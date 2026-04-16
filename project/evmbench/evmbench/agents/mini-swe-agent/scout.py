@@ -76,6 +76,33 @@ TREE_ROLES: dict[str, TreeRole] = {
             "and distinguish benchmark-grade findings from low-confidence observations."
         ),
     ),
+    "oracle-price": TreeRole(
+        name="oracle-price",
+        title="Oracle And Price",
+        description="Examine price feeds, TWAP windows, decimal handling, stale data, and manipulation paths.",
+        focus=(
+            "Prioritize oracle freshness, feed decimals, quote/base inversion, TWAP manipulation, fallback "
+            "feeds, sequencer assumptions, and any path where a distorted price can move protocol value."
+        ),
+    ),
+    "state-machine": TreeRole(
+        name="state-machine",
+        title="State Machine",
+        description="Inspect lifecycle transitions, temporal assumptions, replay protection, and state locks.",
+        focus=(
+            "Check phase changes, epoch and deadline logic, pause/unpause paths, nonce and replay controls, "
+            "state-dependent authorization, and ways to skip, repeat, or reorder critical transitions."
+        ),
+    ),
+    "standards-compliance": TreeRole(
+        name="standards-compliance",
+        title="Standards Compliance",
+        description="Review ERC/interface assumptions, token edge cases, signatures, and integration contracts.",
+        focus=(
+            "Look for unsafe assumptions around ERC20/ERC721/ERC4626 behavior, fee-on-transfer and rebasing "
+            "tokens, permit/signature domains, callback requirements, return values, and interface mismatches."
+        ),
+    ),
 }
 
 DEFAULT_TREE_ROLE_NAMES: tuple[str, ...] = tuple(TREE_ROLES)

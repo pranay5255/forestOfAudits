@@ -735,7 +735,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-tree-roles",
         type=_positive_int,
         default=int(os.getenv("MAX_TREE_ROLES", "4")),
-        help="Maximum scout-selected roles to activate. Use 5 to run the full initial tree set.",
+        help="Maximum scout-selected roles to activate. Use 8 to run the full default tree set.",
     )
     parser.add_argument(
         "--tree-roles",

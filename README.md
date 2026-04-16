@@ -75,6 +75,7 @@ submission contracts, and grading. Agents own the search strategy used to
 produce the submission.
 
 ## Forest-of-Thought Test-Time Scaling
+<img width="2017" height="772" alt="image" src="https://github.com/user-attachments/assets/3d8ae847-91a1-437b-a6bb-a7e2ba08b02c" />
 
 Forest-of-Thought is the test-time scaling strategy implemented here for smart
 contract audits. Instead of asking one agent trajectory to find every bug, the

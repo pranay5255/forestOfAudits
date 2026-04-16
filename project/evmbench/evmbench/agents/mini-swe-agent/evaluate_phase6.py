@@ -67,6 +67,11 @@ AVAILABLE_RUNNERS: tuple[RunnerSpec, ...] = (
     ),
     RunnerSpec("modal-forest", "mini-swe-agent-modal-forest", "Modal forest/TTS"),
     RunnerSpec("modal-forest-smoke", "mini-swe-agent-modal-forest-smoke", "Modal forest/TTS smoke"),
+    RunnerSpec(
+        "modal-forest-gpt52-codex-8trees",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-8trees",
+        "Modal forest/TTS GPT-5.2 Codex 8-tree",
+    ),
 )
 
 RUNNER_GROUPS: dict[str, tuple[RunnerSpec, ...]] = {

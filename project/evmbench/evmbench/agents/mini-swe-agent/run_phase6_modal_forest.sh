@@ -16,7 +16,29 @@ Examples:
 Environment:
   MODAL_AUDIT_IMAGE_REPO defaults to ghcr.io/pranay5255/evmbench-audit.
   PHASE6_SCOPE defaults to first5 when --scope is not provided.
+  PHASE6_DRIVER_LOG overrides the combined terminal transcript path.
 EOF
+}
+
+arg_value() {
+    local name="$1"
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "${name}")
+                if [[ $# -gt 1 ]]; then
+                    printf '%s\n' "$2"
+                    return 0
+                fi
+                ;;
+            "${name}="*)
+                printf '%s\n' "${1#*=}"
+                return 0
+                ;;
+        esac
+        shift
+    done
+    return 1
 }
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -60,7 +82,20 @@ evaluator=(uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py)
 
 case "${command}" in
     run | plan)
-        exec "${evaluator[@]}" "${command}" --scope "${PHASE6_SCOPE:-first5}" "$@" --runners modal-forest
+        output_root="$(arg_value --output-root "$@" || true)"
+        if [[ -z "${output_root}" ]]; then
+            output_root="runs/phase6/modal-forest-${PHASE6_SCOPE:-first5}-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+            set -- "$@" --output-root "${output_root}"
+        fi
+        mkdir -p "${output_root}"
+        driver_log="${PHASE6_DRIVER_LOG:-${output_root}/phase6-driver.log}"
+        mkdir -p "$(dirname -- "${driver_log}")"
+        printf '[phase6-wrapper] combined terminal log: %s\n' "${driver_log}"
+        set +e
+        "${evaluator[@]}" "${command}" --scope "${PHASE6_SCOPE:-first5}" "$@" --runners modal-forest 2>&1 | tee "${driver_log}"
+        status=${PIPESTATUS[0]}
+        set -e
+        exit "${status}"
         ;;
     summarize)
         exec "${evaluator[@]}" summarize "$@"

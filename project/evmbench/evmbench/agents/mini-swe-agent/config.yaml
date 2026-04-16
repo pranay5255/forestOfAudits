@@ -1,0 +1,95 @@
+env-config-vars: &env-config-vars
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  MODEL: openai/gpt-5
+  STEP_LIMIT: "50"
+  COST_LIMIT: "20.0"
+
+modal-smoke-task: &modal-smoke-task >-
+  This is a capped EVMBench detect integration smoke. Read
+  /home/agent/AGENTS.md, inspect enough of /home/agent/audit to produce a
+  syntactically valid concise report, write it to
+  /home/agent/submission/audit.md, verify the file exists, then submit. It is
+  acceptable for findings to be incomplete because this run validates
+  integration wiring rather than audit quality.
+
+common: &common_settings
+  start: mini-swe-agent/start.sh
+  runner: container
+  instruction_file_name: AGENTS.md
+  gateway_sni_hosts:
+    - api.openai.com
+
+mini-swe-agent-default:
+  <<: *common_settings
+  env_vars:
+    <<: *env-config-vars
+
+mini-swe-agent-smoke-10:
+  <<: *common_settings
+  env_vars:
+    <<: *env-config-vars
+    STEP_LIMIT: "10"
+    COST_LIMIT: "5.0"
+
+mini-swe-agent-gpt-5-mini:
+  <<: *common_settings
+  env_vars:
+    <<: *env-config-vars
+    MODEL: openai/gpt-5-mini
+    COST_LIMIT: "10.0"
+
+mini-swe-agent-modal-baseline:
+  <<: *common_settings
+  runner: modal_baseline
+  env_vars:
+    <<: *env-config-vars
+    MODAL_OPENAI_SECRET_NAME: openai-api-key
+
+mini-swe-agent-modal-forest:
+  <<: *common_settings
+  runner: modal_forest
+  env_vars:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    MODEL: openai/gpt-5
+    SCOUT_STEP_LIMIT: "16"
+    SCOUT_COST_LIMIT: "1.0"
+    BRANCH_STEP_LIMIT: "36"
+    BRANCH_COST_LIMIT: "1.5"
+    JUDGE_STEP_LIMIT: "24"
+    JUDGE_COST_LIMIT: "1.0"
+    GLOBAL_STEP_LIMIT: "36"
+    GLOBAL_COST_LIMIT: "3.0"
+    BRANCHES_PER_TREE: "2"
+    MAX_TREE_ROLES: "4"
+    FOREST_WORKER_CONCURRENCY: "4"
+
+mini-swe-agent-modal-baseline-smoke-10:
+  <<: *common_settings
+  runner: modal_baseline
+  env_vars:
+    <<: *env-config-vars
+    STEP_LIMIT: "10"
+    COST_LIMIT: "5.0"
+    MODAL_OPENAI_SECRET_NAME: openai-api-key
+    MODAL_ALLOW_SMOKE_FALLBACK_SUBMISSION: "1"
+    MODAL_TASK: *modal-smoke-task
+
+mini-swe-agent-modal-forest-smoke:
+  <<: *common_settings
+  runner: modal_forest
+  env_vars:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    MODEL: openai/gpt-5
+    SCOUT_STEP_LIMIT: "8"
+    SCOUT_COST_LIMIT: "1.5"
+    BRANCH_STEP_LIMIT: "10"
+    BRANCH_COST_LIMIT: "2.0"
+    JUDGE_STEP_LIMIT: "8"
+    JUDGE_COST_LIMIT: "1.5"
+    GLOBAL_STEP_LIMIT: "10"
+    GLOBAL_COST_LIMIT: "2.0"
+    BRANCHES_PER_TREE: "1"
+    MAX_TREE_ROLES: "2"
+    FOREST_WORKER_CONCURRENCY: "2"
+    MODAL_ALLOW_SMOKE_FALLBACK_SUBMISSION: "1"
+    MODAL_TASK: *modal-smoke-task

@@ -116,6 +116,58 @@ def test_modal_forest_invocation_maps_budget_env(tmp_path: Path) -> None:
     assert "2" in invocation.command
 
 
+def test_modal_forest_invocation_maps_8tree_gpt52_codex_env(tmp_path: Path) -> None:
+    agent = Agent(
+        id="mini-swe-agent-modal-forest-gpt-5.2-codex-8trees",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_forest",
+        env_vars={
+            "MODEL": "openai/gpt-5.2-codex",
+            "SCOUT_MODEL": "openai/gpt-5.2-codex",
+            "BRANCH_MODEL": "openai/gpt-5.2-codex",
+            "JUDGE_MODEL": "openai/gpt-5.2-codex",
+            "GLOBAL_MODEL": "openai/gpt-5.2-codex",
+            "BRANCHES_PER_TREE": "1",
+            "MAX_TREE_ROLES": "8",
+            "TREE_ROLES": "token-flow,accounting,access-control,cross-contract,exploitability,oracle-price,state-machine,standards-compliance",
+            "FOREST_WORKER_CONCURRENCY": "8",
+            "MSWEA_COST_TRACKING": "ignore_errors",
+        },
+    )
+
+    invocation = build_modal_runner_invocation(
+        agent,
+        _task(),
+        tmp_path / "modal",
+        python_executable="python",
+    )
+
+    assert "--model" in invocation.command
+    assert "openai/gpt-5.2-codex" in invocation.command
+    assert invocation.command.count("openai/gpt-5.2-codex") == 5
+    assert "--branches-per-tree" in invocation.command
+    assert "1" in invocation.command
+    assert "--max-tree-roles" in invocation.command
+    assert "8" in invocation.command
+    assert "--tree-roles" in invocation.command
+    tree_roles = invocation.command[invocation.command.index("--tree-roles") + 1]
+    assert tree_roles.split(",") == [
+        "token-flow",
+        "accounting",
+        "access-control",
+        "cross-contract",
+        "exploitability",
+        "oracle-price",
+        "state-machine",
+        "standards-compliance",
+    ]
+    assert "--worker-concurrency" in invocation.command
+    assert "--cost-tracking" in invocation.command
+    assert "ignore_errors" in invocation.command
+
+
 def test_modal_invocation_can_use_registry_image_repo_without_changing_task_image(tmp_path: Path) -> None:
     agent = Agent(
         id="mini-swe-agent-modal-baseline-smoke-10",

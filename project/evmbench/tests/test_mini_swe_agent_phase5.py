@@ -143,10 +143,10 @@ def test_modal_invocation_can_use_registry_image_repo_without_changing_task_imag
 
 
 def test_modal_runner_smoke_fallback_writes_submission(tmp_path: Path, monkeypatch) -> None:
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    def fake_stream(*args, **kwargs):
+        return "", "", 0
 
-    monkeypatch.setattr("evmbench.agents.modal_runner.subprocess.run", fake_run)
+    monkeypatch.setattr("evmbench.agents.modal_runner._run_modal_entrypoint_streaming", fake_stream)
     agent = Agent(
         id="mini-swe-agent-modal-baseline-smoke-10",
         name="mini-swe-agent",

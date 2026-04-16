@@ -32,6 +32,14 @@ Each audit uses its own Docker image. To build these, run:
 uv run docker_build.py --split all
 ```
 
+If Docker build cannot reach Ubuntu package mirrors, override the mirror or use
+host networking for the build steps:
+
+```bash
+uv run docker_build.py --split all --build-network host
+uv run docker_build.py --split all --ubuntu-mirror http://mirrors.edge.kernel.org/ubuntu
+```
+
 To tag images for a remote registry (useful for running on a compute fleet), pass a fully qualified repo name:
 
 ```bash
@@ -125,6 +133,203 @@ To add a new agent, see `evmbench/agents` (each agent has a `config.yaml` + a `s
 ### Results and logs
 
 By default, outputs go under `project/evmbench/runs/`. Each invocation creates a run-group directory containing `group.log`, and per-audit run log files.
+
+## Forest of Audits Phase 6
+
+Phase 6 evaluates the forest-of-auditors Modal path against comparable single-agent runs in detect mode. The default pilot uses the first five detect audits:
+
+- `2023-07-pooltogether`
+- `2023-10-nextgen`
+- `2023-12-ethereumcreditguild`
+- `2024-01-canto`
+- `2024-01-curves`
+
+The default comparison matrix runs each audit with:
+
+- `codex-default`
+- `mini-swe-agent-modal-baseline`
+- `mini-swe-agent-modal-forest`
+
+Preview the exact command matrix without launching agents:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py plan --scope first5
+```
+
+Run the default Phase 6 comparison:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py run --scope first5
+```
+
+Run only the Modal forest/TTS runner:
+
+```bash
+evmbench/agents/mini-swe-agent/run_phase6_modal_forest.sh --scope first5
+```
+
+Summarize an existing run root:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py summarize --output-root runs/phase6/<timestamp>
+```
+
+The Phase 6 harness writes all raw logs, grading summaries, forest metadata, and presentation-ready data under one output root: `runs/phase6/<timestamp>/`.
+
+For the final presentation runbook, including every runner slug and smoke/full matrix commands, see `PRESENTATION_RUNBOOK.md`.
+
+List the runnable Phase 6 variants:
+
+```bash
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh variants
+```
+
+Run the low-budget smoke matrix:
+
+```bash
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope smoke --runners smoke --stop-on-failure
+```
+
+Run the default presentation comparison:
+
+```bash
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope first5 --runners presentation --stop-on-failure
+```
+
+### Phase 6 Architecture
+
+```mermaid
+flowchart TD
+    Eval[Phase 6 evaluator] --> Matrix[Build runner x audit matrix]
+    Matrix --> AuditA[Audit repo 1]
+    Matrix --> AuditB[Audit repo 2]
+    Matrix --> AuditN[Audit repo 5]
+
+    AuditA --> Codex[Container runner: codex-default]
+    AuditA --> Baseline[Modal runner: mini-swe-agent-modal-baseline]
+    AuditA --> Forest[Modal runner: mini-swe-agent-modal-forest]
+
+    Codex --> Computer[EVMBench task computer]
+    Baseline --> ModalRunner[evmbench/agents/modal_runner.py]
+    Forest --> ModalRunner
+
+    ModalRunner --> Entrypoint[mini-swe-agent entrypoint.py]
+    Entrypoint --> BaselineImpl[Modal baseline]
+    Entrypoint --> ForestImpl[Modal forest]
+
+    Computer --> Submission[submission/audit.md]
+    BaselineImpl --> ModalSubmission[modal/submission/audit.md]
+    ForestImpl --> ModalSubmission
+    ModalSubmission --> Submission
+
+    Submission --> Grade[EVMBench detect grading]
+    Grade --> Results[phase6-results.json and phase6-summary.md]
+    Results --> Slides[phase6-slide-data.json and phase6-slide-data.csv]
+```
+
+### Forest Worker Flow
+
+The forest runner keeps branch outputs isolated. Only the global judge writes the final EVMBench-compatible report.
+
+```mermaid
+flowchart TD
+    Start[Detect task and rendered AGENTS.md] --> Scout[Scout worker]
+    Scout --> Roles[Select up to MAX_TREE_ROLES roles]
+
+    Roles --> Token[token-flow tree]
+    Roles --> Accounting[accounting tree]
+    Roles --> Access[access-control tree]
+    Roles --> Cross[cross-contract tree]
+    Roles --> Exploit[exploitability tree]
+
+    Token --> TokenBranches[BRANCHES_PER_TREE branch workers]
+    Accounting --> AccountingBranches[BRANCHES_PER_TREE branch workers]
+    Access --> AccessBranches[BRANCHES_PER_TREE branch workers]
+    Cross --> CrossBranches[BRANCHES_PER_TREE branch workers]
+    Exploit --> ExploitBranches[BRANCHES_PER_TREE branch workers]
+
+    TokenBranches --> TokenJudge[token-flow judge]
+    AccountingBranches --> AccountingJudge[accounting judge]
+    AccessBranches --> AccessJudge[access-control judge]
+    CrossBranches --> CrossJudge[cross-contract judge]
+    ExploitBranches --> ExploitJudge[exploitability judge]
+
+    TokenJudge --> Global[Global judge]
+    AccountingJudge --> Global
+    AccessJudge --> Global
+    CrossJudge --> Global
+    ExploitJudge --> Global
+
+    Global --> Final[Final submission: /home/agent/submission/audit.md]
+```
+
+### Modal Forest Sequence
+
+```mermaid
+sequenceDiagram
+    participant Eval as evaluate_phase6.py
+    participant Bench as EVMBench entrypoint
+    participant Solver as EVMbenchSolver
+    participant Runner as modal_runner.py
+    participant Entry as mini-swe-agent entrypoint.py
+    participant Forest as modal_forest.py
+    participant Grade as EVMBench grader
+
+    Eval->>Bench: Run one audit and runner command
+    Bench->>Solver: Start rollout
+    Solver->>Solver: Resolve agent_id
+    alt Modal forest runner
+        Solver->>Runner: run_modal_runner(agent, task, run_dir/modal)
+        Runner->>Entry: entrypoint.py forest --audit-id ...
+        Entry->>Forest: run_modal_forest(config)
+        Forest->>Forest: scout, branches, tree judges, global judge
+        Forest-->>Runner: modal/submission/audit.md and metadata
+        Runner-->>Solver: ModalRunnerResult
+        Solver->>Solver: Copy modal submission into task computer
+    else Container runner
+        Solver->>Solver: Upload start.sh and AGENTS.md
+        Solver->>Solver: Run agent inside task computer
+    end
+    Solver->>Grade: Grade submission/audit.md
+    Grade-->>Eval: run.log grade event
+    Eval->>Eval: Summarize rows and write presentation artifacts
+```
+
+### Phase 6 Artifacts
+
+```mermaid
+flowchart LR
+    Root[runs/phase6/timestamp] --> MatrixJson[phase6-run-matrix.json]
+    Root --> CommandLogs[_phase6_command_logs]
+    Root --> RunnerDir[runner directories]
+    Root --> ResultsJson[phase6-results.json]
+    Root --> SummaryMd[phase6-summary.md]
+    Root --> SlideJson[phase6-slide-data.json]
+    Root --> SlideCsv[phase6-slide-data.csv]
+
+    CommandLogs --> Stdout[runner/audit.stdout.log]
+    CommandLogs --> Stderr[runner/audit.stderr.log]
+    CommandLogs --> Status[runner/audit.json]
+
+    RunnerDir --> RunDir[group/audit_run]
+    RunDir --> RunLog[run.log]
+    RunDir --> SubmissionFile[submission/audit.md]
+    RunDir --> ModalDir[modal]
+    ModalDir --> ModalCommand[logs/modal-runner-command.json]
+    ModalDir --> BaselineMeta[logs/modal-baseline-result.json]
+    ModalDir --> ForestMeta[logs/modal-forest-result.json]
+    ModalDir --> Traj[logs and forest trajectories]
+```
+
+`submission/audit.md` is the grading source of truth. Modal metadata, trajectories, command logs, and slide data are auxiliary artifacts for debugging, demos, and presentation decks.
+
+Presentation inputs:
+
+- `phase6-results.json`: canonical structured results for charts and tables.
+- `phase6-summary.md`: human-readable aggregate and per-audit summary.
+- `phase6-slide-data.json`: chart-ready aggregate, per-audit, and forest worker data.
+- `phase6-slide-data.csv`: flat per-audit rows for spreadsheets or slide tools.
+- `modal/logs/modal-forest-result.json`: selected roles, worker runtimes, errors, and trajectory paths for forest runs.
 
 ## Running At Scale
 

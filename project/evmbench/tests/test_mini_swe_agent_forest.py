@@ -82,6 +82,20 @@ def test_scout_decision_filters_unknown_roles_and_caps() -> None:
     assert decision.role_rationale == {}
 
 
+def test_default_tree_role_catalog_supports_eight_tree_runs() -> None:
+    assert len(scout.DEFAULT_TREE_ROLE_NAMES) >= 8
+    assert scout.normalize_role_names(scout.DEFAULT_TREE_ROLE_NAMES, max_roles=8) == (
+        "token-flow",
+        "accounting",
+        "access-control",
+        "cross-contract",
+        "exploitability",
+        "oracle-price",
+        "state-machine",
+        "standards-compliance",
+    )
+
+
 def test_branch_specs_use_isolated_paths_and_do_not_include_submission(tmp_path: Path) -> None:
     config = make_forest_config(tmp_path)
     roles = [scout.get_tree_role("token-flow"), scout.get_tree_role("accounting")]

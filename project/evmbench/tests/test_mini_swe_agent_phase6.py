@@ -44,6 +44,22 @@ def test_phase6_non_smoke_modal_variants_are_registered_without_fallback() -> No
     assert "MODAL_TASK" not in forest.env_vars
 
 
+def test_phase6_gpt52_codex_8tree_modal_forest_variant_is_registered() -> None:
+    forest = agent_registry.get_agent("mini-swe-agent-modal-forest-gpt-5.2-codex-8trees")
+
+    assert forest.runner == "modal_forest"
+    assert forest.env_vars["MODEL"] == "openai/gpt-5.2-codex"
+    assert forest.env_vars["SCOUT_MODEL"] == "openai/gpt-5.2-codex"
+    assert forest.env_vars["BRANCH_MODEL"] == "openai/gpt-5.2-codex"
+    assert forest.env_vars["JUDGE_MODEL"] == "openai/gpt-5.2-codex"
+    assert forest.env_vars["GLOBAL_MODEL"] == "openai/gpt-5.2-codex"
+    assert forest.env_vars["BRANCHES_PER_TREE"] == "1"
+    assert forest.env_vars["MAX_TREE_ROLES"] == "8"
+    assert len(forest.env_vars["TREE_ROLES"].split(",")) == 8
+    assert forest.env_vars["FOREST_WORKER_CONCURRENCY"] == "8"
+    assert forest.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+
 def test_phase6_plan_emits_default_runner_matrix(tmp_path: Path, capsys) -> None:
     rc = phase6.main(["plan", "--scope", "first5", "--output-root", str(tmp_path)])
 
@@ -91,6 +107,7 @@ def test_phase6_variants_command_lists_runnable_agent_ids(capsys) -> None:
     assert "presentation:" in output
     assert "mini-default\tmini-swe-agent-default" in output
     assert "modal-forest-smoke\tmini-swe-agent-modal-forest-smoke" in output
+    assert "modal-forest-gpt52-codex-8trees\tmini-swe-agent-modal-forest-gpt-5.2-codex-8trees" in output
 
 
 def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: Path) -> None:

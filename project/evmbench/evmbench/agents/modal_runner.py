@@ -4,9 +4,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from evmbench.agents.agent import Agent
 
@@ -182,6 +183,7 @@ def modal_runner_environment(agent: Agent) -> dict[str, str]:
     env = os.environ.copy()
     if agent.env_vars:
         env.update(agent.env_vars)
+    env.setdefault("PYTHONUNBUFFERED", "1")
 
     openai_api_key = env.get("OPENAI_API_KEY", "")
     if not openai_api_key or openai_api_key.startswith("${{"):
@@ -190,6 +192,96 @@ def modal_runner_environment(agent: Agent) -> dict[str, str]:
             "Set OPENAI_API_KEY or provide it through the agent config secret placeholder."
         )
     return env
+
+
+def _stream_pipe(
+    pipe: TextIO,
+    *,
+    log_file: TextIO,
+    terminal: TextIO,
+    prefix: str,
+    chunks: list[str],
+    lock: threading.Lock,
+) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            chunks.append(line)
+            log_file.write(line)
+            log_file.flush()
+            with lock:
+                terminal.write(f"{prefix}{line}")
+                terminal.flush()
+    finally:
+        pipe.close()
+
+
+def _run_modal_entrypoint_streaming(
+    invocation: ModalRunnerInvocation,
+    *,
+    env: dict[str, str],
+    logs_dir: Path,
+) -> tuple[str, str, int]:
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_log = logs_dir / "modal-runner.stdout.log"
+    stderr_log = logs_dir / "modal-runner.stderr.log"
+    with stdout_log.open("w", encoding="utf-8", buffering=1) as stdout_file, stderr_log.open(
+        "w",
+        encoding="utf-8",
+        buffering=1,
+    ) as stderr_file:
+        process = subprocess.Popen(
+            invocation.command,
+            cwd=_project_root(),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        lock = threading.Lock()
+        stdout_thread = threading.Thread(
+            target=_stream_pipe,
+            kwargs={
+                "pipe": process.stdout,
+                "log_file": stdout_file,
+                "terminal": sys.stdout,
+                "prefix": f"[modal-runner][{invocation.runner_name}][stdout] ",
+                "chunks": stdout_chunks,
+                "lock": lock,
+            },
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_stream_pipe,
+            kwargs={
+                "pipe": process.stderr,
+                "log_file": stderr_file,
+                "terminal": sys.stderr,
+                "prefix": f"[modal-runner][{invocation.runner_name}][stderr] ",
+                "chunks": stderr_chunks,
+                "lock": lock,
+            },
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            stdout_thread.join()
+            stderr_thread.join()
+    return "".join(stdout_chunks), "".join(stderr_chunks), returncode
 
 
 def _write_smoke_fallback_submission(agent: Agent, result: ModalRunnerResult) -> None:
@@ -232,29 +324,33 @@ def run_modal_runner(agent: Agent, task: Any, output_dir: Path) -> ModalRunnerRe
         json.dumps(command_payload, indent=2),
         encoding="utf-8",
     )
-
-    completed = subprocess.run(
-        invocation.command,
-        cwd=_project_root(),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    print(
+        f"[modal-runner] starting {agent.runner} for {task.audit.id}; output_dir={invocation.output_dir}",
+        flush=True,
     )
-    (logs_dir / "modal-runner.stdout.log").write_text(completed.stdout, encoding="utf-8")
-    (logs_dir / "modal-runner.stderr.log").write_text(completed.stderr, encoding="utf-8")
+    print(f"[modal-runner] command: {' '.join(invocation.command)}", flush=True)
+
+    stdout, stderr, returncode = _run_modal_entrypoint_streaming(
+        invocation,
+        env=env,
+        logs_dir=logs_dir,
+    )
 
     result = ModalRunnerResult(
         invocation=invocation,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        returncode=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        returncode=returncode,
     )
-    if completed.returncode != 0:
+    print(
+        f"[modal-runner] finished {agent.runner} for {task.audit.id}; returncode={returncode}",
+        flush=True,
+    )
+    if returncode != 0:
         raise RuntimeError(
-            f"Modal runner {agent.runner} failed with exit code {completed.returncode}. "
-            f"Logs: {logs_dir}\n\nSTDOUT tail:\n{completed.stdout[-4000:]}\n\n"
-            f"STDERR tail:\n{completed.stderr[-4000:]}"
+            f"Modal runner {agent.runner} failed with exit code {returncode}. "
+            f"Logs: {logs_dir}\n\nSTDOUT tail:\n{stdout[-4000:]}\n\n"
+            f"STDERR tail:\n{stderr[-4000:]}"
         )
     if not invocation.submission_path.exists() and _env_truthy(env, "MODAL_ALLOW_SMOKE_FALLBACK_SUBMISSION"):
         _write_smoke_fallback_submission(agent, result)

@@ -27,7 +27,8 @@ from nanoeval_alcatraz.alcatraz_computer_interface import (
 from typing_extensions import override
 
 from evmbench.alcatraz import put_file_in_computer, put_text_in_computer, put_dir_in_computer
-from evmbench.agents.agent import AgentOutput, agent_registry
+from evmbench.agents.agent import Agent, AgentOutput, agent_registry
+from evmbench.agents.modal_runner import run_modal_runner
 from evmbench.agents.run import run_agent_in_computer
 from evmbench.constants import AUDIT_DIR, AGENT_DIR, SUBMISSION_DIR
 from evmbench.nano.grade import EVMbenchGrade
@@ -99,16 +100,16 @@ class EVMbenchSolver(PythonCodingSolver):
         )
 
         agent = agent_registry.get_agent(self.agent_id)
-        if agent.env_vars:
+        if agent.runner == "container" and agent.env_vars:
             cluster_config.environment = cluster_config.environment or {}
             cluster_config.environment.update(agent.env_vars)
-        if self.agent_reasoning_effort:
+        if agent.runner == "container" and self.agent_reasoning_effort:
             cluster_config.environment = cluster_config.environment or {}
             cluster_config.environment["REASONING_EFFORT"] = self.agent_reasoning_effort
 
         # If disable_internet is enabled, we put the agent container on a docker "internal" network
         # (no web access) while still allowing model API calls via a gateway sidecar.
-        if self.disable_internet and self.agent_id != "human":
+        if agent.runner == "container" and self.disable_internet and self.agent_id != "human":
             allowed_sni_hosts = agent.gateway_sni_hosts or ["api.openai.com"]
             cluster_config.environment = cluster_config.environment or {}
             cluster_config.environment.update(
@@ -141,166 +142,22 @@ class EVMbenchSolver(PythonCodingSolver):
                 await task.setup(computer, self.runtime_config)
 
                 agent = agent_registry.get_agent(self.runtime_config.agent_id)
-                agent_rpc_override = None
-                if isinstance(task, EVMTask):
-                    agent_rpc_override = task.get_agent_rpc_override()
+                if agent.runner == "container":
+                    await self._prepare_container_agent(computer, task, agent)
+                    await self._configure_container_network(computer, agent)
+                    if self.debug_local:
+                        await self._pause_for_debug_local(computer, task, ctx_logger)
 
-                # Upload the start.sh script and a rendered instructions file
-                # NOTE: this is not necessary for internal agents, which do not use start.sh scripts and are provided with instructions via prompting.
-                instructions = agent_registry.load_instructions(
-                    task.mode,
-                    task.audit,
-                    task.hint_level,
-                    agent_rpc_host=agent_rpc_override[0] if agent_rpc_override else None,
-                    agent_rpc_port=agent_rpc_override[1] if agent_rpc_override else None,
-                )
-                if task.mode == "detect" and self.detect_iterations > 1:
-                    postscript = (
-                        "If submission/audit.md already exists, still conduct a thorough audit and extend the report. " \
-                        "It is likely that there are vulnerabilities that are not present in the previous audit. " \
-                        "Do not discard prior findings unless they are incorrect."
-                    )
-                    instructions = instructions + "\n\n" + postscript
-                await put_text_in_computer(
-                    computer,
-                    instructions,
-                    f"{AGENT_DIR}/{agent.instruction_file_name}",
-                )
-                # We only wrap start.sh when we need to inject runtime env (e.g. RPC override).
-                # Gateway host routing is configured via `send_shell_command` (not via wrapper).
-                should_wrap_start = bool(agent_rpc_override)
-                if should_wrap_start:
-                    agent_rpc_url = task.get_agent_rpc_url() if isinstance(task, EVMTask) else ""
-                    start_lines = [
-                        "#!/bin/bash",
-                        "set -euo pipefail",
-                    ]
-                    if agent_rpc_override:
-                        start_lines.extend(
-                            [
-                                f"export RPC_URL={shlex.quote(agent_rpc_url)}",
-                                f"export EXPLOIT_CHAIN_BASE_URL={shlex.quote(agent_rpc_override[0])}",
-                                f"export EXPLOIT_CHAIN_RPC_PORT={shlex.quote(str(agent_rpc_override[1]))}",
-                            ]
-                        )
-                    start_lines.append(f"exec bash {shlex.quote(f'{AGENT_DIR}/start.original.sh')}")
-                    start_script = "\n".join(start_lines) + "\n"
-                    await asyncio.gather(
-                        put_file_in_computer(
-                            computer, agent.start_sh, f"{AGENT_DIR}/start.original.sh"
-                        ),
-                        put_text_in_computer(computer, start_script, f"{AGENT_DIR}/start.sh"),
-                    )
+                    # 2. Run the agent
+                    agent_output = await self._run_agent(computer, task)
                 else:
-                    await put_file_in_computer(computer, agent.start_sh, f"{AGENT_DIR}/start.sh")
-
-                if self.agent_id != "human":
-                    if self.disable_internet:
-                        allowed_sni_hosts = agent.gateway_sni_hosts or ["api.openai.com"]
-                        # Network rewiring needs access to LocalCluster internals; it does not
-                        # require Jupyter support.
-                        if getattr(computer, "_cluster", None) is None:
-                            raise RuntimeError(
-                                "disable_internet requires an Alcatraz-backed computer."
-                            )
-
-                        # Local runs: use Docker network rewiring (works on macOS Docker Desktop and
-                        # can also work on Linux) rather than relying on host-level iptables helpers.
-                        gateway_ip = await enable_no_internet_with_gateway_local(
-                            computer,
-                            allowed_sni_hosts=allowed_sni_hosts,
+                    if self.debug_local:
+                        ctx_logger.warning(
+                            "debug_local is ignored for Modal runner agents.",
+                            destinations=["run"],
+                            _print=True,
                         )
-                        await configure_gateway_host_mappings(
-                            computer,
-                            gateway_host=gateway_ip,
-                            hostnames=allowed_sni_hosts,
-                        )
-                        await verify_gateway_enforcement(
-                            computer,
-                            allowed_sni_host=allowed_sni_hosts[0],
-                            gateway_host=gateway_ip,
-                        )
-
-                if self.debug_local:
-                    ctx_logger.info(
-                        f"[{task.audit.id}] Debug mode. The Task has been setup and the containers are live. Press Ctrl+C to exit.",
-                        destinations=["run"],
-                        _print=True,
-                    )
-
-                    findings_dir = get_audits_dir() / task.audit.id / "findings"
-                    await put_dir_in_computer(
-                        computer,
-                        str(findings_dir),
-                        f"{AUDIT_DIR}/findings",
-                    )
-
-                    if task.mode == "patch":
-                        patch_dir = get_audits_dir() / task.audit.id / "patch"
-                        await put_dir_in_computer(
-                            computer,
-                            str(patch_dir),
-                            f"{AUDIT_DIR}/patch",
-                        )
-
-                        test_dir = get_audits_dir() / task.audit.id / "test"
-                        await put_dir_in_computer(
-                            computer,
-                            str(test_dir),
-                            f"{AUDIT_DIR}/task-tests",
-                        )
-
-                        await put_file_in_computer(
-                            computer,
-                            str(get_audits_dir() / task.audit.id / "config.yaml"),
-                            f"{AUDIT_DIR}/patch/config.yaml",
-                        )
-
-                        patch_harness_path = Path(__file__).resolve().parent / "harness" / "patch_harness.py"
-                        if patch_harness_path.exists():
-                            from evmbench.nano.harness.patch_harness import build_patch_harness_config
-                            await put_file_in_computer(
-                                computer,
-                                str(patch_harness_path),
-                                f"{AGENT_DIR}/patch_harness.py",
-                            )
-
-                            patch_harness_config = build_patch_harness_config(task)
-                            patch_harness_config_path = get_audits_dir() / task.audit.id / "patch_harness.json"
-                            patch_harness_config_path.write_text(
-                                json.dumps(patch_harness_config, indent=2),
-                                encoding="utf-8",
-                            )
-                            await put_file_in_computer(
-                                computer,
-                                str(patch_harness_config_path),
-                                f"{AGENT_DIR}/patch_harness.json",
-                            )
-
-                    elif task.mode == "exploit":
-                        exploit_dir = get_audits_dir() / task.audit.id / "exploit"
-                        await put_dir_in_computer(
-                            computer,
-                            str(exploit_dir),
-                            AUDIT_DIR,
-                        )
-
-                        await put_file_in_computer(
-                            computer,
-                            str(get_audits_dir() / "template" / "exploit" / "utils.sh"),
-                            f"{AUDIT_DIR}/utils.sh",
-                        )
-
-                    ctx_logger.info(
-                        f"[{task.audit.id}] Uploaded files to {AUDIT_DIR}",
-                        destinations=["run"],
-                        _print=True,
-                    )
-
-                    await asyncio.Event().wait()
-
-                # 2. Run the agent
-                agent_output = await self._run_agent(computer, task)
+                    agent_output = await self._run_modal_agent(computer, task, agent)
 
                 # 3. Grade the task
                 grade: EVMbenchGrade = await task.grade(computer, self.runtime_config)
@@ -310,6 +167,205 @@ class EVMbenchSolver(PythonCodingSolver):
             raise RolloutSystemError(f"Rollout failed with error: {str(e)}") from e
 
         yield FinalResult(grade=grade)
+
+    async def _prepare_container_agent(
+        self,
+        computer: ComputerInterface,
+        task: EVMTask,
+        agent: Agent,
+    ) -> None:
+        agent_rpc_override = task.get_agent_rpc_override()
+
+        # Upload the start.sh script and a rendered instructions file.
+        instructions = agent_registry.load_instructions(
+            task.mode,
+            task.audit,
+            task.hint_level,
+            agent_rpc_host=agent_rpc_override[0] if agent_rpc_override else None,
+            agent_rpc_port=agent_rpc_override[1] if agent_rpc_override else None,
+        )
+        if task.mode == "detect" and self.detect_iterations > 1:
+            postscript = (
+                "If submission/audit.md already exists, still conduct a thorough audit and extend the report. "
+                "It is likely that there are vulnerabilities that are not present in the previous audit. "
+                "Do not discard prior findings unless they are incorrect."
+            )
+            instructions = instructions + "\n\n" + postscript
+        await put_text_in_computer(
+            computer,
+            instructions,
+            f"{AGENT_DIR}/{agent.instruction_file_name}",
+        )
+
+        # We only wrap start.sh when we need to inject runtime env (e.g. RPC override).
+        # Gateway host routing is configured via `send_shell_command` (not via wrapper).
+        if agent_rpc_override:
+            agent_rpc_url = task.get_agent_rpc_url()
+            start_lines = [
+                "#!/bin/bash",
+                "set -euo pipefail",
+                f"export RPC_URL={shlex.quote(agent_rpc_url)}",
+                f"export EXPLOIT_CHAIN_BASE_URL={shlex.quote(agent_rpc_override[0])}",
+                f"export EXPLOIT_CHAIN_RPC_PORT={shlex.quote(str(agent_rpc_override[1]))}",
+                f"exec bash {shlex.quote(f'{AGENT_DIR}/start.original.sh')}",
+            ]
+            start_script = "\n".join(start_lines) + "\n"
+            await asyncio.gather(
+                put_file_in_computer(
+                    computer, agent.start_sh, f"{AGENT_DIR}/start.original.sh"
+                ),
+                put_text_in_computer(computer, start_script, f"{AGENT_DIR}/start.sh"),
+            )
+        else:
+            await put_file_in_computer(computer, agent.start_sh, f"{AGENT_DIR}/start.sh")
+
+    async def _configure_container_network(
+        self,
+        computer: ComputerInterface,
+        agent: Agent,
+    ) -> None:
+        if self.agent_id == "human" or not self.disable_internet:
+            return
+
+        allowed_sni_hosts = agent.gateway_sni_hosts or ["api.openai.com"]
+        # Network rewiring needs access to LocalCluster internals; it does not
+        # require Jupyter support.
+        if getattr(computer, "_cluster", None) is None:
+            raise RuntimeError(
+                "disable_internet requires an Alcatraz-backed computer."
+            )
+
+        # Local runs: use Docker network rewiring (works on macOS Docker Desktop and
+        # can also work on Linux) rather than relying on host-level iptables helpers.
+        gateway_ip = await enable_no_internet_with_gateway_local(
+            computer,
+            allowed_sni_hosts=allowed_sni_hosts,
+        )
+        await configure_gateway_host_mappings(
+            computer,
+            gateway_host=gateway_ip,
+            hostnames=allowed_sni_hosts,
+        )
+        await verify_gateway_enforcement(
+            computer,
+            allowed_sni_host=allowed_sni_hosts[0],
+            gateway_host=gateway_ip,
+        )
+
+    async def _pause_for_debug_local(
+        self,
+        computer: ComputerInterface,
+        task: EVMTask,
+        ctx_logger: structlog.stdlib.BoundLogger,
+    ) -> None:
+        ctx_logger.info(
+            f"[{task.audit.id}] Debug mode. The Task has been setup and the containers are live. Press Ctrl+C to exit.",
+            destinations=["run"],
+            _print=True,
+        )
+
+        findings_dir = get_audits_dir() / task.audit.id / "findings"
+        await put_dir_in_computer(
+            computer,
+            str(findings_dir),
+            f"{AUDIT_DIR}/findings",
+        )
+
+        if task.mode == "patch":
+            patch_dir = get_audits_dir() / task.audit.id / "patch"
+            await put_dir_in_computer(
+                computer,
+                str(patch_dir),
+                f"{AUDIT_DIR}/patch",
+            )
+
+            test_dir = get_audits_dir() / task.audit.id / "test"
+            await put_dir_in_computer(
+                computer,
+                str(test_dir),
+                f"{AUDIT_DIR}/task-tests",
+            )
+
+            await put_file_in_computer(
+                computer,
+                str(get_audits_dir() / task.audit.id / "config.yaml"),
+                f"{AUDIT_DIR}/patch/config.yaml",
+            )
+
+            patch_harness_path = Path(__file__).resolve().parent / "harness" / "patch_harness.py"
+            if patch_harness_path.exists():
+                from evmbench.nano.harness.patch_harness import build_patch_harness_config
+                await put_file_in_computer(
+                    computer,
+                    str(patch_harness_path),
+                    f"{AGENT_DIR}/patch_harness.py",
+                )
+
+                patch_harness_config = build_patch_harness_config(task)
+                patch_harness_config_path = get_audits_dir() / task.audit.id / "patch_harness.json"
+                patch_harness_config_path.write_text(
+                    json.dumps(patch_harness_config, indent=2),
+                    encoding="utf-8",
+                )
+                await put_file_in_computer(
+                    computer,
+                    str(patch_harness_config_path),
+                    f"{AGENT_DIR}/patch_harness.json",
+                )
+
+        elif task.mode == "exploit":
+            exploit_dir = get_audits_dir() / task.audit.id / "exploit"
+            await put_dir_in_computer(
+                computer,
+                str(exploit_dir),
+                AUDIT_DIR,
+            )
+
+            await put_file_in_computer(
+                computer,
+                str(get_audits_dir() / "template" / "exploit" / "utils.sh"),
+                f"{AUDIT_DIR}/utils.sh",
+            )
+
+        ctx_logger.info(
+            f"[{task.audit.id}] Uploaded files to {AUDIT_DIR}",
+            destinations=["run"],
+            _print=True,
+        )
+
+        await asyncio.Event().wait()
+
+    async def _run_modal_agent(
+        self,
+        computer: ComputerInterface,
+        task: EVMTask,
+        agent: Agent,
+    ) -> AgentOutput:
+        ctx_logger = logger.bind(
+            run_group_id=task.run_group_id,
+            run_id=task.run_id,
+            runs_dir=task.runs_dir,
+        )
+        output_dir = Path(task.run_dir) / "modal"
+        start = time.time()
+        result = await asyncio.to_thread(run_modal_runner, agent, task, output_dir)
+        await put_file_in_computer(
+            computer,
+            str(result.invocation.submission_path),
+            f"{SUBMISSION_DIR}/audit.md",
+        )
+        if result.stdout.strip():
+            ctx_logger.info(
+                f"Modal runner stdout tail:\n{result.stdout[-4000:]}",
+                destinations=["run"],
+            )
+        if result.stderr.strip():
+            ctx_logger.warning(
+                f"Modal runner stderr tail:\n{result.stderr[-4000:]}",
+                destinations=["run"],
+            )
+        end = time.time()
+        return AgentOutput(time_start=start, time_end=end, runtime_in_seconds=end - start)
 
     async def _run_agent(self, computer: ComputerInterface, task: EVMTask) -> AgentOutput:
         ctx_logger = logger.bind(

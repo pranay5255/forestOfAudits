@@ -22,6 +22,7 @@ class Agent:
     name: str
     start_sh: str
     instruction_file_name: str
+    runner: Literal["container", "modal_baseline", "modal_forest"] = "container"
     env_vars: dict[str, str] | None = None
     # When EVMbenchSolver.disable_internet is enabled, we use an L4 gateway that allowlists
     # TLS by SNI. This list configures which hostnames are permitted.
@@ -34,6 +35,8 @@ class AgentOutput:
     runtime_in_seconds: float
 
 class AgentRegistry:
+    _VALID_RUNNERS = {"container", "modal_baseline", "modal_forest"}
+
     def _resolve_env_vars(self, env_vars: dict[str, str]) -> dict[str, str]:
         """
         Resolve ${{ secrets.NAME }} placeholders using host environment variables.
@@ -66,10 +69,11 @@ class AgentRegistry:
                 contents = yaml.safe_load(f)
             if agent_id not in contents:
                 continue
-            env_vars = contents[agent_id].get("env_vars", None)
+            agent_config = contents[agent_id]
+            env_vars = agent_config.get("env_vars", None)
             if isinstance(env_vars, dict):
                 env_vars = self._resolve_env_vars(env_vars)
-            gateway_sni_hosts = contents[agent_id].get("gateway_sni_hosts", None)
+            gateway_sni_hosts = agent_config.get("gateway_sni_hosts", None)
             if gateway_sni_hosts is not None:
                 if not isinstance(gateway_sni_hosts, list) or not all(
                     isinstance(x, str) and x.strip() for x in gateway_sni_hosts
@@ -78,14 +82,37 @@ class AgentRegistry:
                         f"Invalid gateway_sni_hosts for agent '{agent_id}' in {fpath}"
                     )
                 gateway_sni_hosts = [x.strip() for x in gateway_sni_hosts]
+            runner = agent_config.get("runner", "container")
+            if runner not in self._VALID_RUNNERS:
+                raise ValueError(
+                    f"Invalid runner for agent '{agent_id}' in {fpath}: {runner!r}. "
+                    f"Expected one of {sorted(self._VALID_RUNNERS)}."
+                )
+            start_sh = self._resolve_start_path(fpath, str(agent_config.get("start", "start.sh")))
             return Agent(
                 id=agent_id,
                 name=fpath.parent.name,
-                start_sh=str(fpath.parent / "start.sh"),
-                instruction_file_name=contents[agent_id]["instruction_file_name"],
+                start_sh=str(start_sh),
+                instruction_file_name=agent_config["instruction_file_name"],
+                runner=runner,
                 env_vars=env_vars,
                 gateway_sni_hosts=gateway_sni_hosts,
             )
+
+    def _resolve_start_path(self, config_path: Path, start: str) -> Path:
+        start_path = Path(start)
+        if start_path.is_absolute():
+            return start_path
+
+        config_relative = config_path.parent / start_path
+        if config_relative.exists():
+            return config_relative
+
+        agents_relative = get_agents_dir() / start_path
+        if agents_relative.exists():
+            return agents_relative
+
+        return config_relative
 
     def get_instructions_path(self, mode: Literal["detect", "patch", "exploit"]) -> Path:
         return get_agents_dir() / "instructions" / f"{mode.upper()}.md"

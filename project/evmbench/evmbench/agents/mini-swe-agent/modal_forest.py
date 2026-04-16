@@ -90,6 +90,21 @@ ARCHIVE_BEGIN = "__EVMBENCH_MODAL_FOREST_ARCHIVE_BEGIN__"
 ARCHIVE_END = "__EVMBENCH_MODAL_FOREST_ARCHIVE_END__"
 
 
+def _format_seconds(value: float) -> str:
+    if value < 60:
+        return f"{value:.1f}s"
+    minutes, seconds = divmod(value, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m{seconds:04.1f}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h{int(minutes):02d}m{seconds:04.1f}s"
+
+
+def _log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"[modal-forest][{timestamp}] {message}", flush=True)
+
+
 @dataclass(frozen=True)
 class ForestConfig:
     audit_id: str
@@ -175,6 +190,15 @@ class WorkerSpec:
     forbid_submission: bool = True
 
 
+def _worker_label(spec: WorkerSpec) -> str:
+    parts = [spec.worker_type, spec.worker_name]
+    if spec.role:
+        parts.append(f"role={spec.role.name}")
+    if spec.branch_index is not None:
+        parts.append(f"branch={branch_id(spec.branch_index)}")
+    return " ".join(parts)
+
+
 def _json_ready_config(config: ForestConfig) -> dict[str, Any]:
     payload = asdict(config)
     payload["output_dir"] = str(config.output_dir)
@@ -235,6 +259,7 @@ def _extract_worker_outputs(
     if include_submission:
         entries[SUBMISSION_DIR] = "submission"
 
+    _log(f"extracting worker outputs worker={worker_name} include_submission={include_submission}")
     rendered_entries = ",\n    ".join(f"{source!r}: {arcname!r}" for source, arcname in entries.items())
     command = f"""python3 - <<'PY'
 import base64
@@ -259,6 +284,7 @@ PY"""
     output = _run_remote(env, command, f"extract forest outputs for {worker_name}")
     archive_bytes = _decode_marked_base64(str(output.get("output", "")), ARCHIVE_BEGIN, ARCHIVE_END)
     _safe_extract_tar(archive_bytes, output_dir)
+    _log(f"extracted worker outputs worker={worker_name} output_dir={output_dir}")
 
 
 def _verify_worker_contract(env: Any, spec: WorkerSpec) -> None:
@@ -286,14 +312,23 @@ def _run_worker(
     started_at = time.time()
     result: dict[str, Any] | None = None
     error: str | None = None
+    label = _worker_label(spec)
+    _log(
+        "worker start "
+        f"{label} model={spec.model_name} step_limit={spec.step_limit} "
+        f"cost_limit={spec.cost_limit} trajectory={spec.trajectory_path} output={spec.output_path or '-'}"
+    )
     env = _make_env(config, config.image, openai_api_key)
     try:
+        _log(f"worker prepare remote workspace {label}")
         _prepare_remote_workspace(env)
         _stage_rendered_instructions(env, instructions)
         for remote_path, text in spec.staged_files.items():
+            _log(f"worker stage file {label} remote_path={remote_path} bytes={len(text.encode('utf-8'))}")
             _remote_write_text(env, remote_path, text, f"stage {remote_path}")
 
         ploit_toml = _prepare_mode(env, audit, config.mode)
+        _log(f"worker run agent {label}")
         model = LitellmModel(
             model_name=spec.model_name,
             model_kwargs=config.model_kwargs,
@@ -309,12 +344,15 @@ def _run_worker(
             output_path=spec.trajectory_path,
         )
         result = agent.run(spec.task, **spec.template_vars)
+        _log(f"worker verify outputs {label}")
         _verify_worker_contract(env, spec)
         if spec.include_submission:
+            _log(f"worker postprocess final submission {label}")
             _postprocess_mode(env, audit, config.mode, ploit_toml)
         _extract_worker_outputs(env, config.output_dir, spec.worker_name, include_submission=spec.include_submission)
     except Exception as exc:
         error = str(exc)
+        _log(f"worker error {label}: {error}")
         try:
             _extract_worker_outputs(env, config.output_dir, spec.worker_name, include_submission=spec.include_submission)
         except Exception:
@@ -324,6 +362,8 @@ def _run_worker(
     finally:
         ended_at = time.time()
         env.stop()
+        status = "error" if error else "ok"
+        _log(f"worker finish {label} status={status} runtime={_format_seconds(ended_at - started_at)}")
 
     return WorkerResult(
         worker_type=spec.worker_type,
@@ -481,6 +521,8 @@ def _run_specs_parallel(
     if not specs:
         return []
     max_workers = max(1, min(config.worker_concurrency, len(specs)))
+    worker_type = specs[0].worker_type
+    _log(f"worker batch start type={worker_type} count={len(specs)} concurrency={max_workers}")
     results: list[WorkerResult] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_spec = {
@@ -497,11 +539,18 @@ def _run_specs_parallel(
         for future in as_completed(future_to_spec):
             spec = future_to_spec[future]
             try:
-                results.append(future.result())
+                result = future.result()
+                results.append(result)
+                status = "error" if result.error else "ok"
+                _log(
+                    f"worker batch collected name={result.worker_name} type={result.worker_type} "
+                    f"status={status} runtime={_format_seconds(result.runtime_seconds)}"
+                )
             except Exception as exc:
                 if not config.continue_on_worker_error:
                     raise
                 now = time.time()
+                _log(f"worker batch captured error name={spec.worker_name} error={exc}")
                 results.append(
                     WorkerResult(
                         worker_type=spec.worker_type,
@@ -516,7 +565,10 @@ def _run_specs_parallel(
                         output_path=spec.output_path,
                     )
                 )
-    return sorted(results, key=lambda item: item.worker_name)
+    sorted_results = sorted(results, key=lambda item: item.worker_name)
+    n_errors = sum(1 for result in sorted_results if result.error)
+    _log(f"worker batch finish type={worker_type} count={len(sorted_results)} errors={n_errors}")
+    return sorted_results
 
 
 def _select_roles(config: ForestConfig) -> tuple[ScoutDecision, tuple[TreeRole, ...]]:
@@ -533,6 +585,11 @@ def _select_roles(config: ForestConfig) -> tuple[ScoutDecision, tuple[TreeRole, 
     roles = tuple(get_tree_role(name) for name in selected_names)
     if not roles:
         raise RuntimeError("No forest roles were selected.")
+    _log(
+        "selected forest roles: "
+        + ", ".join(role.name for role in roles)
+        + f" (summary={scout_decision.summary or '-'})"
+    )
     return scout_decision, roles
 
 
@@ -543,6 +600,19 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     (config.output_dir / "logs" / "forest").mkdir(parents=True, exist_ok=True)
+    _log(
+        f"run start audit={config.audit_id} mode={config.mode} image={config.image} "
+        f"output_dir={config.output_dir}"
+    )
+    _log(
+        "budgets "
+        f"scout={config.scout_step_limit}/{config.scout_cost_limit} "
+        f"branch={config.branch_step_limit}/{config.branch_cost_limit} "
+        f"tree_judge={config.judge_step_limit}/{config.judge_cost_limit} "
+        f"global={config.global_step_limit}/{config.global_cost_limit} "
+        f"branches_per_tree={config.branches_per_tree} max_tree_roles={config.max_tree_roles} "
+        f"worker_concurrency={config.worker_concurrency}"
+    )
 
     audit, instructions = _load_audit_for_mode(cast(Any, config))
     started_at = time.time()
@@ -552,6 +622,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     error: str | None = None
 
     try:
+        _log("stage start scout")
         scout_result = _run_worker(
             config,
             audit,
@@ -562,6 +633,11 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         worker_results.append(scout_result)
 
         scout_decision, selected_roles = _select_roles(config)
+        _log(
+            "stage start branch workers "
+            f"roles={','.join(role.name for role in selected_roles)} "
+            f"branches_per_tree={config.branches_per_tree}"
+        )
         branch_results = _run_specs_parallel(
             config,
             audit,
@@ -571,6 +647,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         )
         worker_results.extend(branch_results)
 
+        _log(f"stage start tree judges roles={','.join(role.name for role in selected_roles)}")
         tree_judge_results = _run_specs_parallel(
             config,
             audit,
@@ -580,6 +657,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         )
         worker_results.extend(tree_judge_results)
 
+        _log("stage start global judge")
         global_result = _run_worker(
             config,
             audit,
@@ -592,6 +670,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         final_report = config.output_dir / "submission" / "audit.md"
         if config.mode == "detect" and not final_report.exists():
             raise RuntimeError(f"Forest final submission was not extracted: {final_report}")
+        _log(f"final submission ready path={final_report}")
 
         return {
             "output_dir": str(config.output_dir),
@@ -600,6 +679,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         }
     except Exception as exc:
         error = str(exc)
+        _log(f"run error audit={config.audit_id}: {error}")
         raise
     finally:
         ended_at = time.time()
@@ -611,6 +691,10 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             started_at=started_at,
             ended_at=ended_at,
             error=error,
+        )
+        _log(
+            f"metadata written path={config.metadata_path} "
+            f"runtime={_format_seconds(ended_at - started_at)} error={error or '-'}"
         )
 
 

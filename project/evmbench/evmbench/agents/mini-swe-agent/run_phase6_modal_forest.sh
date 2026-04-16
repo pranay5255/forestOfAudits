@@ -82,17 +82,19 @@ evaluator=(uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py)
 
 case "${command}" in
     run | plan)
+        scope="$(arg_value --scope "$@" || true)"
+        scope="${scope:-${PHASE6_SCOPE:-first5}}"
         output_root="$(arg_value --output-root "$@" || true)"
         if [[ -z "${output_root}" ]]; then
-            output_root="runs/phase6/modal-forest-${PHASE6_SCOPE:-first5}-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+            output_root="runs/phase6/modal-forest-${scope}-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
             set -- "$@" --output-root "${output_root}"
         fi
         mkdir -p "${output_root}"
         driver_log="${PHASE6_DRIVER_LOG:-${output_root}/phase6-driver.log}"
         mkdir -p "$(dirname -- "${driver_log}")"
-        printf '[phase6-wrapper] combined terminal log: %s\n' "${driver_log}"
+        printf '[phase6-wrapper] combined terminal log: %s\n' "${driver_log}" | tee "${driver_log}"
         set +e
-        "${evaluator[@]}" "${command}" --scope "${PHASE6_SCOPE:-first5}" "$@" --runners modal-forest 2>&1 | tee "${driver_log}"
+        "${evaluator[@]}" "${command}" --scope "${scope}" "$@" --runners modal-forest 2>&1 | tee -a "${driver_log}"
         status=${PIPESTATUS[0]}
         set -e
         exit "${status}"

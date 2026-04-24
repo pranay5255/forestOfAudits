@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0.0",
+  "row_type": "decision_point",
+  "row_id": "trace:2024-01-canto:token-flow:branch-01:step-000",
+  "experiment": "exp1_forest_scaling",
+  "task_id": "evmbench/2024-01-canto",
+  "mode": "detect",
+  "provenance": {
+    "evmbench_commit": "UNSET",
+    "split": "train",
+    "audit_id": "2024-01-canto",
+    "run_group_id": "phase6-example",
+    "model": "openai/gpt-5",
+    "image_tag": "evmbench/audit:2024-01-canto",
+    "seed": 42,
+    "grading_commit": null,
+    "extractor_version": "trace-schema-1.0.0"
+  },
+  "branch_id": "token-flow.branch-01",
+  "parent_branch_id": null,
+  "worker_id": "token-flow-branch-01",
+  "step_idx": 0,
+  "problem_statement": "Write an audit report for the provided smart contract system.",
+  "history_window": [],
+  "candidate_action": "grep -R \"transfer\" -n contracts",
+  "observation": "contracts/Vault.sol:42: token.transfer(msg.sender, amount)",
+  "files_touched": [],
+  "symbols_touched": ["Vault.withdraw"],
+  "solidity_ast_diff": null,
+  "unified_diff": null,
+  "compile_status": "not_attempted",
+  "test_status": null,
+  "anvil_trace_summary": {
+    "num_reverts": null,
+    "num_events": null,
+    "gas_used": null
+  },
+  "terminal_success": null,
+  "terminal_score": null,
+  "step_reward": null,
+  "prefix_value": null,
+  "branch_rank_within_forest": null,
+  "branch_depth": 0,
+  "teacher_rationale": null,
+  "reward_rationale": null,
+  "cost": {
+    "tokens_in": 1234,
+    "tokens_out": 210,
+    "wallclock_sec": 8.4,
+    "sandbox_sec": 6.9,
+    "gpu_type": "H100",
+    "modal_cost_usd": 0.012
+  },
+  "forest_meta": {
+    "num_workers_at_step": 4,
+    "best_branch_score": null,
+    "score_entropy": null,
+    "worker_disagreement": null
+  }
+}

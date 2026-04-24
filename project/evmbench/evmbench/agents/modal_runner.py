@@ -11,7 +11,6 @@ from typing import Any, TextIO
 
 from evmbench.agents.agent import Agent
 
-
 MODAL_RUNNER_COMMANDS = {
     "modal_baseline": "baseline",
     "modal_forest": "forest",
@@ -185,13 +184,25 @@ def modal_runner_environment(agent: Agent) -> dict[str, str]:
         env.update(agent.env_vars)
     env.setdefault("PYTHONUNBUFFERED", "1")
 
-    openai_api_key = env.get("OPENAI_API_KEY", "")
-    if not openai_api_key or openai_api_key.startswith("${{"):
+    openai_api_key = _usable_api_key(env.get("OPENAI_API_KEY"))
+    vllm_api_key = _usable_api_key(env.get("VLLM_API_KEY"))
+    model_api_key = openai_api_key or vllm_api_key
+    if not model_api_key:
         raise RuntimeError(
-            f"Agent {agent.id!r} uses {agent.runner}, but OPENAI_API_KEY is not set on the host. "
-            "Set OPENAI_API_KEY or provide it through the agent config secret placeholder."
+            f"Agent {agent.id!r} uses {agent.runner}, but neither OPENAI_API_KEY nor VLLM_API_KEY "
+            "is set on the host. Set OPENAI_API_KEY for OpenAI-backed runs, or set VLLM_API_KEY "
+            "with VLLM_API_BASE for self-hosted vLLM."
         )
+    if not openai_api_key:
+        env["OPENAI_API_KEY"] = model_api_key
     return env
+
+
+def _usable_api_key(value: str | None) -> str:
+    stripped = (value or "").strip()
+    if not stripped or stripped.startswith("${{"):
+        return ""
+    return stripped
 
 
 def _stream_pipe(

@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0.0",
+  "row_type": "controller_state",
+  "row_id": "controller:2024-01-canto:step-002",
+  "experiment": "exp4_controller",
+  "task_id": "evmbench/2024-01-canto",
+  "mode": "detect",
+  "provenance": {
+    "evmbench_commit": "UNSET",
+    "split": "train",
+    "audit_id": "2024-01-canto",
+    "run_group_id": "phase6-example",
+    "model": "openai/gpt-5",
+    "image_tag": "evmbench/audit:2024-01-canto",
+    "seed": 42,
+    "grading_commit": null,
+    "extractor_version": "trace-schema-1.0.0"
+  },
+  "step_idx": 2,
+  "forest_state": {
+    "num_workers": 4,
+    "step_budget_used": 8,
+    "best_prm_score": 0.81,
+    "score_entropy": 0.19,
+    "worker_disagreement": 0.67,
+    "compile_success_rate": 1.0,
+    "unique_files_touched": 0,
+    "duplicate_action_rate": 0.25,
+    "branch_depths": [2, 2, 2, 2],
+    "current_best_score": 0.81,
+    "avg_worker_progress": 2.0
+  },
+  "controller_action": "STOP_AND_SUBMIT",
+  "action_rationale": "top branch has sufficient detect evidence for the current budget",
+  "outcome": {
+    "terminal_success": true,
+    "terminal_score": 1.0,
+    "total_cost_usd": 0.14,
+    "workers_used": 4
+  }
+}

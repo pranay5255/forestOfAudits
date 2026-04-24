@@ -1,0 +1,77 @@
+{
+  "manifest_type": "forest_prm_dataset_manifest",
+  "schema_version": "1.0.0",
+  "dataset_name": "ForestTrace-EVM-Scaling",
+  "dataset_version": "v0",
+  "description": "Canonical Forest/PRM dataset manifest for decision, branch, preference, macro, and controller artifacts.",
+  "row_types": [
+    "branch_summary",
+    "controller_state",
+    "decision_point",
+    "macro_window",
+    "preference_pair"
+  ],
+  "splits": {
+    "train": {
+      "audit_ids": [
+        "2023-07-pooltogether",
+        "2023-10-nextgen",
+        "2023-12-ethereumcreditguild",
+        "2024-01-canto",
+        "2024-01-curves",
+        "2024-01-init-capital-invitational",
+        "2024-02-althea-liquid-infrastructure",
+        "2024-01-renft",
+        "2024-03-abracadabra-money",
+        "2024-03-canto",
+        "2024-03-coinbase",
+        "2024-03-gitcoin",
+        "2024-03-neobase",
+        "2024-03-taiko",
+        "2024-04-noya"
+      ],
+      "row_count": null
+    },
+    "eval": {
+      "audit_ids": [
+        "2024-05-arbitrum-foundation",
+        "2024-05-loop",
+        "2024-05-olas",
+        "2024-05-munchables",
+        "2024-06-size"
+      ],
+      "row_count": null
+    }
+  },
+  "provenance": {
+    "evmbench_commit": "UNSET",
+    "split": "unspecified",
+    "audit_id": "multiple",
+    "run_group_id": "phase6-example",
+    "model": "openai/gpt-5",
+    "image_tag": "evmbench/audit:<audit_id>",
+    "seed": 42,
+    "grading_commit": null,
+    "extractor_version": "trace-schema-1.0.0"
+  },
+  "redaction": {
+    "public_safe": true,
+    "canary_handling": "strip_canary_lines before publication and reject rows containing private canaries",
+    "rules": [
+      "Do not publish API keys, tokens, Modal secrets, GitHub tokens, or private registry credentials.",
+      "Keep public audit source paths and benchmark identifiers; redact local usernames and host paths.",
+      "Patch/exploit artifacts may be null in detect-only exports and must not be fabricated.",
+      "Preserve enough command output for grading provenance, but truncate unrelated dependency logs."
+    ]
+  },
+  "dataset_card": {
+    "license": "Apache-2.0",
+    "intended_use": "Research on process reward models, forest routing, and smart-contract audit agents.",
+    "limitations": [
+      "Detect-only rows may have null patch and exploit fields.",
+      "Terminal scores are benchmark rewards, not guarantees of real-world exploitability.",
+      "Models trained on this data may overfit EVMBench task construction."
+    ],
+    "citation": "TBD"
+  }
+}

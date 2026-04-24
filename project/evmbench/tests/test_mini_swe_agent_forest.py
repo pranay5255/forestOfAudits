@@ -24,6 +24,7 @@ def load_agent_module(name: str) -> ModuleType:
 
 scout = load_agent_module("scout")
 judge = load_agent_module("judge")
+modal_baseline = load_agent_module("modal_baseline")
 modal_forest = load_agent_module("modal_forest")
 
 
@@ -134,3 +135,89 @@ def test_tree_judge_stages_existing_and_missing_branch_reports(tmp_path: Path) -
 
     assert staged["/home/agent/forest/token-flow/branch-inputs/branch-01.md"] == "# Branch one\n"
     assert "Missing Branch Report" in staged["/home/agent/forest/token-flow/branch-inputs/branch-02.md"]
+
+
+def test_modal_baseline_config_injects_vllm_api_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    parser = modal_baseline.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--audit-id",
+            "2024-01-canto",
+            "--image",
+            "evmbench/audit:2024-01-canto",
+            "--output-dir",
+            str(tmp_path),
+            "--model-kwargs-json",
+            '{"temperature":0}',
+        ]
+    )
+
+    config = modal_baseline.config_from_args(args)
+
+    assert config.model_kwargs == {
+        "temperature": 0,
+        "api_base": "https://vllm.example.test/v1",
+    }
+
+
+def test_modal_baseline_config_keeps_explicit_api_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    parser = modal_baseline.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--audit-id",
+            "2024-01-canto",
+            "--image",
+            "evmbench/audit:2024-01-canto",
+            "--output-dir",
+            str(tmp_path),
+            "--model-kwargs-json",
+            '{"api_base":"https://explicit.example.test/v1"}',
+        ]
+    )
+
+    config = modal_baseline.config_from_args(args)
+
+    assert config.model_kwargs["api_base"] == "https://explicit.example.test/v1"
+
+
+def test_modal_forest_config_injects_vllm_api_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    parser = modal_forest.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--audit-id",
+            "2024-01-canto",
+            "--output-dir",
+            str(tmp_path),
+            "--model-kwargs-json",
+            '{"temperature":0}',
+        ]
+    )
+
+    config = modal_forest.config_from_args(args)
+
+    assert config.model_kwargs == {
+        "temperature": 0,
+        "api_base": "https://vllm.example.test/v1",
+    }
+
+
+def test_modal_forest_config_keeps_explicit_api_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    parser = modal_forest.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--audit-id",
+            "2024-01-canto",
+            "--output-dir",
+            str(tmp_path),
+            "--model-kwargs-json",
+            '{"api_base":"https://explicit.example.test/v1"}',
+        ]
+    )
+
+    config = modal_forest.config_from_args(args)
+
+    assert config.model_kwargs["api_base"] == "https://explicit.example.test/v1"

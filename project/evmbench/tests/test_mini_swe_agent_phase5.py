@@ -1,8 +1,14 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from evmbench.agents.agent import Agent, agent_registry
-from evmbench.agents.modal_runner import build_modal_runner_invocation, run_modal_runner
+from evmbench.agents.modal_runner import (
+    build_modal_runner_invocation,
+    modal_runner_environment,
+    run_modal_runner,
+)
 
 
 def _task() -> SimpleNamespace:
@@ -116,6 +122,32 @@ def test_modal_forest_invocation_maps_budget_env(tmp_path: Path) -> None:
     assert "2" in invocation.command
 
 
+def test_modal_invocation_forwards_model_kwargs_json(tmp_path: Path) -> None:
+    agent = Agent(
+        id="mini-swe-agent-modal-forest-smoke",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_forest",
+        env_vars={
+            "MODEL": "openai/gpt-5",
+            "MODEL_KWARGS_JSON": '{"api_base":"https://example.test/v1"}',
+        },
+    )
+
+    invocation = build_modal_runner_invocation(
+        agent,
+        _task(),
+        tmp_path / "modal",
+        python_executable="python",
+    )
+
+    assert "--model-kwargs-json" in invocation.command
+    assert invocation.command[invocation.command.index("--model-kwargs-json") + 1] == (
+        '{"api_base":"https://example.test/v1"}'
+    )
+
+
 def test_modal_forest_invocation_maps_8tree_gpt52_codex_env(tmp_path: Path) -> None:
     agent = Agent(
         id="mini-swe-agent-modal-forest-gpt-5.2-codex-8trees",
@@ -217,3 +249,58 @@ def test_modal_runner_smoke_fallback_writes_submission(tmp_path: Path, monkeypat
 
     assert result.invocation.submission_path.exists()
     assert "EVMBench Modal Integration Smoke" in result.invocation.submission_path.read_text()
+
+
+def test_modal_runner_environment_accepts_only_vllm_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    agent = Agent(
+        id="mini-swe-agent-modal-forest",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_forest",
+        env_vars={"OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}"},
+    )
+
+    env = modal_runner_environment(agent)
+
+    assert env["VLLM_API_KEY"] == "vllm-key"
+    assert env["OPENAI_API_KEY"] == "vllm-key"
+
+
+def test_modal_runner_environment_preserves_openai_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    agent = Agent(
+        id="mini-swe-agent-modal-baseline",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_baseline",
+        env_vars={"MODEL": "openai/gpt-5"},
+    )
+
+    env = modal_runner_environment(agent)
+
+    assert env["OPENAI_API_KEY"] == "openai-key"
+    assert env["VLLM_API_KEY"] == "vllm-key"
+
+
+def test_modal_runner_environment_rejects_unresolved_secret_placeholders(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    agent = Agent(
+        id="mini-swe-agent-modal-baseline",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_baseline",
+        env_vars={
+            "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+            "VLLM_API_KEY": "${{ secrets.VLLM_API_KEY }}",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="neither OPENAI_API_KEY nor VLLM_API_KEY"):
+        modal_runner_environment(agent)

@@ -59,12 +59,14 @@ from modal_baseline import (
     _decode_marked_base64,
     _load_audit_for_mode,
     _load_mini_classes,
+    _model_kwargs_with_vllm_api_base,
     _parse_json_object,
     _postprocess_mode,
     _prepare_mode,
     _prepare_remote_workspace,
     _remote_workspace_env,
     _remote_write_text,
+    _resolve_model_api_key,
     _run_remote,
     _safe_extract_tar,
     _stage_rendered_instructions,
@@ -357,8 +359,6 @@ def _run_worker(
             _extract_worker_outputs(env, config.output_dir, spec.worker_name, include_submission=spec.include_submission)
         except Exception:
             pass
-        if not config.continue_on_worker_error:
-            raise
     finally:
         ended_at = time.time()
         env.stop()
@@ -547,8 +547,6 @@ def _run_specs_parallel(
                     f"status={status} runtime={_format_seconds(result.runtime_seconds)}"
                 )
             except Exception as exc:
-                if not config.continue_on_worker_error:
-                    raise
                 now = time.time()
                 _log(f"worker batch captured error name={spec.worker_name} error={exc}")
                 results.append(
@@ -569,6 +567,22 @@ def _run_specs_parallel(
     n_errors = sum(1 for result in sorted_results if result.error)
     _log(f"worker batch finish type={worker_type} count={len(sorted_results)} errors={n_errors}")
     return sorted_results
+
+
+def _check_stage_errors(
+    results: list[WorkerResult],
+    stage_name: str,
+    *,
+    continue_on_error: bool,
+) -> None:
+    """Raise if any worker in *results* has an error and we should not continue."""
+    errors = [r for r in results if r.error]
+    if errors and not continue_on_error:
+        names = ", ".join(r.worker_name for r in errors)
+        raise RuntimeError(
+            f"Stage '{stage_name}' had {len(errors)} worker error(s) [{names}]. "
+            f"Partial traces have been saved — check modal-forest-result.json for details."
+        )
 
 
 def _select_roles(config: ForestConfig) -> tuple[ScoutDecision, tuple[TreeRole, ...]]:
@@ -594,9 +608,7 @@ def _select_roles(config: ForestConfig) -> tuple[ScoutDecision, tuple[TreeRole, 
 
 
 def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY must be set for the LiteLLM OpenAI-backed model.")
+    openai_api_key = _resolve_model_api_key()
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     (config.output_dir / "logs" / "forest").mkdir(parents=True, exist_ok=True)
@@ -622,6 +634,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     error: str | None = None
 
     try:
+        # --- scout stage ---
         _log("stage start scout")
         scout_result = _run_worker(
             config,
@@ -631,8 +644,14 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             openai_api_key=openai_api_key,
         )
         worker_results.append(scout_result)
+        _check_stage_errors(
+            [scout_result], "scout",
+            continue_on_error=config.continue_on_worker_error,
+        )
 
         scout_decision, selected_roles = _select_roles(config)
+
+        # --- branch workers stage ---
         _log(
             "stage start branch workers "
             f"roles={','.join(role.name for role in selected_roles)} "
@@ -646,7 +665,12 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             openai_api_key=openai_api_key,
         )
         worker_results.extend(branch_results)
+        _check_stage_errors(
+            branch_results, "branch",
+            continue_on_error=config.continue_on_worker_error,
+        )
 
+        # --- tree judges stage ---
         _log(f"stage start tree judges roles={','.join(role.name for role in selected_roles)}")
         tree_judge_results = _run_specs_parallel(
             config,
@@ -656,7 +680,12 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             openai_api_key=openai_api_key,
         )
         worker_results.extend(tree_judge_results)
+        _check_stage_errors(
+            tree_judge_results, "tree_judge",
+            continue_on_error=config.continue_on_worker_error,
+        )
 
+        # --- global judge stage ---
         _log("stage start global judge")
         global_result = _run_worker(
             config,
@@ -666,6 +695,10 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             openai_api_key=openai_api_key,
         )
         worker_results.append(global_result)
+        _check_stage_errors(
+            [global_result], "global_judge",
+            continue_on_error=config.continue_on_worker_error,
+        )
 
         final_report = config.output_dir / "submission" / "audit.md"
         if config.mode == "detect" and not final_report.exists():
@@ -816,7 +849,7 @@ def config_from_args(args: argparse.Namespace) -> ForestConfig:
         deployment_timeout=args.deployment_timeout,
         install_pipx=args.install_pipx,
         output_dir=output_dir,
-        model_kwargs=args.model_kwargs_json,
+        model_kwargs=_model_kwargs_with_vllm_api_base(args.model_kwargs_json),
         modal_sandbox_kwargs=args.modal_sandbox_kwargs_json,
         cost_tracking=args.cost_tracking,
         task=args.task,

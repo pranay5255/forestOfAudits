@@ -27,6 +27,8 @@ from typing import Any, Literal
 
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
+from modal_compat import patch_swerex_modal_image_builder
+
 from evmbench.agents.agent import agent_registry
 from evmbench.audit import Audit, audit_registry
 from evmbench.constants import (
@@ -48,7 +50,6 @@ from evmbench.constants import (
 from evmbench.nano.grade import GraderContext, build_grader
 from evmbench.nano.runtime import EVMRuntimeConfig
 from evmbench.utils import get_audits_dir, get_bash_utils_file, get_default_runs_dir, get_timestamp
-from modal_compat import patch_swerex_modal_image_builder
 
 Mode = Literal["detect", "patch", "exploit"]
 HintLevel = Literal["none", "low", "med", "high", "max"]
@@ -530,12 +531,7 @@ def run_modal_baseline(config: ModalBaselineConfig) -> dict[str, Any]:
     if config.mode != "detect":
         raise RuntimeError("The Modal baseline currently supports detect mode only.")
 
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY must be set on the host because DefaultAgent/LiteLLM and local detect grading "
-            "run in this process. The Modal secret supplies the sandbox environment, not the host model calls."
-        )
+    openai_api_key = _resolve_model_api_key()
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
@@ -607,6 +603,36 @@ def _parse_json_object(raw: str, flag: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError(f"{flag} must decode to a JSON object.")
     return value
+
+
+def _model_kwargs_with_vllm_api_base(model_kwargs: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(model_kwargs)
+    vllm_api_base = os.getenv("VLLM_API_BASE", "").strip()
+    if vllm_api_base and "api_base" not in resolved:
+        resolved["api_base"] = vllm_api_base
+    return resolved
+
+
+def _resolve_model_api_key() -> str:
+    openai_api_key = _usable_api_key(os.getenv("OPENAI_API_KEY"))
+    vllm_api_key = _usable_api_key(os.getenv("VLLM_API_KEY"))
+    model_api_key = openai_api_key or vllm_api_key
+    if not model_api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY must be set on the host for OpenAI-backed runs, or VLLM_API_KEY must "
+            "be set with VLLM_API_BASE for self-hosted vLLM. DefaultAgent/LiteLLM and local detect "
+            "grading run in this process; Modal secrets only supply sandbox environment variables."
+        )
+    if not openai_api_key:
+        os.environ["OPENAI_API_KEY"] = model_api_key
+    return model_api_key
+
+
+def _usable_api_key(value: str | None) -> str:
+    stripped = (value or "").strip()
+    if not stripped or stripped.startswith("${{"):
+        return ""
+    return stripped
 
 
 def _default_output_dir(audit_id: str, mode: str) -> Path:
@@ -684,7 +710,7 @@ def config_from_args(args: argparse.Namespace) -> ModalBaselineConfig:
         judge_model=args.judge_model,
         judge_reasoning_effort=args.judge_reasoning_effort,
         output_dir=output_dir,
-        model_kwargs=args.model_kwargs_json,
+        model_kwargs=_model_kwargs_with_vllm_api_base(args.model_kwargs_json),
         modal_sandbox_kwargs=args.modal_sandbox_kwargs_json,
         cost_tracking=args.cost_tracking,
         task=args.task,

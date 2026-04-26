@@ -247,7 +247,7 @@ def build_global_judge_task(base_task: str, mode: Mode = "detect") -> str:
         "exploit": "Execute or recreate the best final exploit; the runner will export submission/txs.json from chain history.",
     }[mode]
     return (
-        f"{base_task}\n\n"
+        f"{base_task}\n\n" +
         mode_task
     )
 

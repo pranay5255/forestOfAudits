@@ -112,9 +112,9 @@ You use the mini-swe-agent shell interface to inspect the audit target, map the
 attack surface, and choose which specialist audit trees should receive budget."""
 
 SCOUT_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md and
-/home/agent/AUDIT_SCOPE.md for the benchmark instructions and scoped target
-file list. Then inspect only the scoped file(s) present under /home/agent/audit
-enough to identify the dominant protocol surfaces.
+/home/agent/AUDIT_SCOPE.md for the benchmark instructions and scope guide.
+Then inspect /home/agent/audit enough to identify the dominant protocol
+surfaces.
 
 Write both scout artifacts:
 
@@ -133,8 +133,8 @@ Choose only from these roles:
 
 {{ role_catalog }}
 
-Do not write /home/agent/submission/audit.md. The final global judge is the
-only worker allowed to write the EVMBench submission.
+Do not write files under /home/agent/submission. The final global judge is the
+only worker allowed to write the EVMBench submission artifact.
 
 When the scout artifacts are written and verified, finish by issuing exactly
 this command and no other command:

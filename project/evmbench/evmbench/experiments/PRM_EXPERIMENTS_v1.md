@@ -8,6 +8,12 @@
 - Compute budget is ~$1500/month across H100/B200 on Modal.
 - The goal is an incremental release strategy: dataset first, then PRM, then trained agent.
 
+**Schema contract (binding):**
+- `SCHEMA.md` is the concise normative schema spec.
+- `DATASET_SCHEMA_GUIDE.md` is the reader-friendly field guide and Phase 6 mapping.
+- `trace_schema.py` is the executable validator; every published JSON/JSONL row must pass `validate_artifact()`.
+- This document defines experiment plans and artifact names only. Inline examples are field sketches, not alternate schemas; use `extensions` or bump `schema_version` for experiment-specific fields that are not in v1.
+
 ---
 
 ## Experiment 0 — Infrastructure Baseline
@@ -35,32 +41,9 @@ uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py run --scope smok
 | Model | `openai/gpt-4o` (most accessible teacher) |
 | Modal GPU | `H100` |
 
-**Schema emitted (smoke baseline):**
+**Validated rows emitted (smoke baseline):**
 
-```json
-{
-  "experiment": "exp0_baseline",
-  "task_id": "evmbench/<audit_id>",
-  "mode": "detect",
-  "worker_id": "w00",
-  "branch_id": "smoke.w00.b00",
-  "step_idx": 0,
-  "problem_statement": "...",
-  "history_window": [],
-  "candidate_action": "...",
-  "compile_status": "pass",
-  "test_status": {"num_passed": 0, "num_failed": 0},
-  "terminal_success": null,
-  "terminal_score": null,
-  "step_reward": null,
-  "cost": {
-    "tokens_in": 0,
-    "tokens_out": 0,
-    "wallclock_sec": 0.0,
-    "sandbox_sec": 0.0
-  }
-}
-```
+Emit v1 `decision_point` rows for worker steps and v1 `branch_summary` rows for terminal branch outcomes. Use `experiment: "exp0_baseline"` and deterministic smoke ids such as `smoke.<audit_id>.w00.b00.s000`. See `SCHEMA.md` and `schema_examples/decision_point_detect.json` for the complete required fields, including `schema_version`, `row_type`, `row_id`, `provenance`, complete `cost`, and `test_status.num_errors`.
 
 **Dependencies to verify:**
 - `uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py` runs without import errors
@@ -68,7 +51,7 @@ uv run python evmbench/agents/mini-swe-agent/evaluate_phase6.py run --scope smok
 - `ghcr.io/pranay5255/evmbench-audit` image is accessible
 - `project/evmbench/evmbench/nano/grade/detect.py` grading runs on a known-good audit
 
-**Acceptance gate:** `runs/phase6/smoke-*/summary.json` exists with `num_tasks >= 4` and at least one `terminal_success` field populated.
+**Acceptance gate:** `runs/phase6/smoke-*/phase6-results.json` and `runs/phase6/smoke-*/phase6-summary.md` exist, at least 4 tasks ran, and at least one exported v1 row has `terminal_success` populated.
 
 ---
 
@@ -95,87 +78,15 @@ For the first release, use a reduced matrix:
 `first20 × {1, 4, 16} workers × {10, 40} steps × detect only × best-terminal × seed 42`
 = 6 configurations × ~20 tasks = ~120 runs (feasible in one week on $1500 budget)
 
-### Schema per decision point
+### Decision rows
 
-Every logged row uses this schema — one row per worker-step:
+Every logged worker step is exported as a v1 `decision_point` row with `experiment: "exp1_forest_scaling"`. The canonical field list is in `SCHEMA.md`; the walkthrough table and Phase 6 mapping are in `DATASET_SCHEMA_GUIDE.md`.
 
-```json
-{
-  "experiment": "exp1_forest_scaling",
-  "task_id": "evmbench/<audit_id>",
-  "mode": "detect | patch | exploit",
-  "repo_snapshot": "<commit-hash of audit repo at task start>",
-  "worker_id": "w01",
-  "branch_id": "task001.w01.b03",
-  "parent_branch_id": "task001.w01.b02",
-  "step_idx": 12,
-
-  "problem_statement": "Write an audit report for this contract...",
-  "history_window": [
-    {"action": "git diff", "output": "..."},
-    {"action": "forge test", "output": "..."}
-  ],
-  "candidate_action": "cat contracts/Vault.sol | grep -n withdraw",
-  "observation": "Found reentrancy in line 42...",
-
-  "files_touched": ["src/Vault.sol"],
-  "symbols_touched": ["Vault.withdraw", "Vault.deposit"],
-  "solidity_ast_diff": {
-    "edit_type": "function_body_modify",
-    "function_name": "withdraw",
-    "contract": "Vault",
-    "line_start": 40,
-    "line_end": 55
-  },
-  "unified_diff": "--- a/src/Vault.sol\n+++ b/src/Vault.sol\n@@ -42,7 +42,7 @@...",
-
-  "compile_status": "pass | fail | not_attempted",
-  "test_status": {
-    "num_passed": 23,
-    "num_failed": 2
-  },
-  "anvil_trace_summary": {
-    "num_reverts": 1,
-    "num_events": 3,
-    "gas_used": 48230
-  },
-
-  "terminal_success": true,
-  "terminal_score": 1.0,
-  "step_reward": 0.42,
-  "prefix_value": 0.76,
-  "branch_rank_within_forest": 2,
-  "branch_depth": 3,
-
-  "teacher_rationale": "This action inspected the vulnerable sink correctly...",
-  "reward_rationale": {
-    "evidence": [
-      "branch inspected vulnerable accounting path",
-      "patch touched withdraw logic",
-      "tests still compile"
-    ],
-    "failure_modes": [
-      "may overfit hidden invariant"
-    ]
-  },
-
-  "cost": {
-    "tokens_in": 12345,
-    "tokens_out": 900,
-    "wallclock_sec": 42.1,
-    "sandbox_sec": 38.7,
-    "gpu_type": "H100",
-    "modal_cost_usd": 0.046
-  },
-
-  "forest_meta": {
-    "num_workers_at_step": 4,
-    "best_branch_score": 0.81,
-    "score_entropy": 0.19,
-    "worker_disagreement": 0.67
-  }
-}
-```
+Experiment-specific notes:
+- Store audit/repo snapshot metadata in `provenance.evmbench_commit` when it is the EVMBench source commit, or under `extensions.exp1.repo_snapshot` when it describes the task checkout separately.
+- `compile_status` must be one of `pass`, `fail`, `not_attempted`, or `unknown`.
+- `test_status` is either `null` or an object with `num_passed`, `num_failed`, and `num_errors`.
+- `forest_meta` is limited to `num_workers_at_step`, `best_branch_score`, `score_entropy`, and `worker_disagreement` in schema v1.
 
 ### How to derive PRM labels offline
 
@@ -193,8 +104,10 @@ V(s_t) = max(R_branch for all descendants of s_t)
 
 | Output | Path |
 |---|---|
-| Raw trajectories | `runs/phase6/exp1-scaling-<timestamp>/forest_traces.jsonl` |
-| Aggregated results | `runs/phase6/exp1-scaling-<timestamp>/summary.json` |
+| Extracted decision rows | `runs/phase6/exp1-scaling-<timestamp>/forest_trace_evm_scaling_v0.jsonl` |
+| Extracted branch rows | `runs/phase6/exp1-scaling-<timestamp>/forest_branch_summaries_v0.jsonl` |
+| Phase 6 results | `runs/phase6/exp1-scaling-<timestamp>/phase6-results.json` |
+| Phase 6 summary | `runs/phase6/exp1-scaling-<timestamp>/phase6-summary.md` |
 | Width/success curve | `runs/phase6/exp1-scaling-<timestamp>/plots/width_scaling.png` |
 | Depth/success curve | `runs/phase6/exp1-scaling-<timestamp>/plots/depth_scaling.png` |
 
@@ -203,7 +116,7 @@ V(s_t) = max(R_branch for all descendants of s_t)
 **ForestTrace-EVM-Scaling-v0**
 - Host on Hugging Face Datasets
 - Dataset card must document: EVMBench version, Modal GPU type used, model used, grading commit
-- Each row is one decision point (not one trajectory) per schema above
+- Each row is one v1 `decision_point` (not one trajectory)
 - Canonical split: `train` = first 15 audits, `eval` = last 5 audits
 
 ### Dependencies
@@ -273,50 +186,40 @@ def construct_preference_pairs(trajectories):
                     "task_id": task_id,
                     "same_depth": True,
                     "depth": depth,
-                    "chosen_branch_id": at_depth[0].branch_id,
-                    "chosen_prefix": at_depth[0].history_window,
-                    "rejected_branch_id": at_depth[-1].branch_id,
-                    "rejected_prefix": at_depth[-1].history_window,
-                    "chosen_terminal_score": at_depth[0].terminal_score,
-                    "rejected_terminal_score": at_depth[-1].terminal_score,
-                    "chosen_step_reward": at_depth[0].step_reward,
-                    "rejected_step_reward": at_depth[-1].step_reward,
+                    "chosen": {
+                        "branch_id": at_depth[0].branch_id,
+                        "trace_row_id": at_depth[0].row_id,
+                        "history_window": at_depth[0].history_window,
+                        "terminal_score": at_depth[0].terminal_score,
+                        "step_reward": at_depth[0].step_reward,
+                        "prefix_value": at_depth[0].prefix_value,
+                    },
+                    "rejected": {
+                        "branch_id": at_depth[-1].branch_id,
+                        "trace_row_id": at_depth[-1].row_id,
+                        "history_window": at_depth[-1].history_window,
+                        "terminal_score": at_depth[-1].terminal_score,
+                        "step_reward": at_depth[-1].step_reward,
+                        "prefix_value": at_depth[-1].prefix_value,
+                    },
+                    "context": {
+                        "problem_statement": at_depth[0].problem_statement,
+                        "files_touched": sorted({
+                            path
+                            for branch in at_depth
+                            for path in branch.files_touched
+                        }),
+                        "num_workers_at_depth": len(at_depth),
+                        "best_score_at_depth": at_depth[0].terminal_score,
+                        "score_entropy_at_depth": score_entropy(at_depth),
+                    },
                 })
     return pairs
 ```
 
 ### Schema: ForestPref-EVM-v0
 
-```json
-{
-  "experiment": "exp2_preference",
-  "task_id": "evmbench/<audit_id>",
-  "mode": "detect",
-  "depth": 7,
-  "same_depth": true,
-
-  "chosen": {
-    "branch_id": "task001.w04.b02",
-    "history_window": [...],
-    "terminal_score": 1.0,
-    "step_reward": 0.81
-  },
-  "rejected": {
-    "branch_id": "task001.w07.b01",
-    "history_window": [...],
-    "terminal_score": 0.0,
-    "step_reward": 0.0
-  },
-
-  "context": {
-    "problem_statement": "...",
-    "files_touched": ["src/Vault.sol"],
-    "num_workers_at_depth": 4,
-    "best_score_at_depth": 1.0,
-    "score_entropy_at_depth": 0.19
-  }
-}
-```
+Export pairwise examples as v1 `preference_pair` rows with `experiment: "exp2_preference"`. Each `chosen` and `rejected` side must include `branch_id`, `trace_row_id`, `history_window`, `terminal_score`, `step_reward`, and `prefix_value`; `trace_row_id` links back to the source `decision_point.row_id`. The shared `context` object is limited to `problem_statement`, `files_touched`, `num_workers_at_depth`, `best_score_at_depth`, and `score_entropy_at_depth`.
 
 ### Model architecture (EVM-PRM-1.5B-v0)
 
@@ -446,82 +349,31 @@ def build_macro_windows(trajectories, window_size=3, gamma=0.9):
         for t in range(len(steps) - window_size + 1):
             window_steps = steps[t:t+window_size]
             macro_reward = sum(
-                gamma**(i) * step_steps[i].step_reward
+                gamma**i * window_steps[i].step_reward
                 for i in range(window_size)
             )
             windows.append({
                 "task_id": traj.task_id,
+                "branch_id": traj.branch_id,
                 "window_start_idx": t,
+                "window_size": window_size,
                 "state_sequence": [s.observation for s in window_steps],
                 "action_sequence": [s.candidate_action for s in window_steps],
                 "observation_sequence": [s.observation for s in window_steps],
                 "macro_reward": macro_reward,
                 "terminal_branch_reward": traj.terminal_score,
+                "discounted_return": macro_reward,
                 "solidity_ast_diffs": [s.solidity_ast_diff for s in window_steps],
-                "files_touched": list(set(s.files_touched for s in window_steps)),
+                "files_touched": sorted({path for s in window_steps for path in s.files_touched}),
+                "compile_status_sequence": [s.compile_status for s in window_steps],
+                "test_status_sequence": [s.test_status for s in window_steps],
             })
     return windows
 ```
 
 ### Schema: EVM-MacroPRM-v0
 
-```json
-{
-  "experiment": "exp3_macro_prm",
-  "task_id": "evmbench/<audit_id>",
-  "window_start_idx": 7,
-  "window_size": 3,
-
-  "state_sequence": [
-    {"observation": "Reentrancy in withdraw() detected at line 42"},
-    {"observation": "Checking Vault storage layout..."},
-    {"observation": "Applying patch to add reentrancy guard..."}
-  ],
-  "action_sequence": [
-    "grep -n 'withdraw' contracts/Vault.sol",
-    "cat forge test output",
-    "git diff src/Vault.sol"
-  ],
-  "observation_sequence": [
-    "Found function withdraw() at line 42...",
-    "Vault has mapping(address=>uint256) balances",
-    "No diff shown yet — patch not applied"
-  ],
-
-  "macro_reward": 0.847,
-  "terminal_branch_reward": 1.0,
-  "discounted_return": 0.847,
-
-  "solidity_ast_diffs": [
-    {
-      "edit_type": "function_body_modify",
-      "function_name": "withdraw",
-      "contract": "Vault",
-      "change_type": "add_check_effects_interactions"
-    },
-    {
-      "edit_type": "none",
-      "function_name": "withdraw",
-      "contract": "Vault",
-      "change_type": "none"
-    },
-    {
-      "edit_type": "function_body_modify",
-      "function_name": "withdraw",
-      "contract": "Vault",
-      "change_type": "add_reentrancy_guard"
-    }
-  ],
-  "files_touched": ["src/Vault.sol", "src/Token.sol"],
-
-  "compile_status_sequence": ["pass", "fail", "pass"],
-  "test_status_sequence": [
-    {"num_passed": 20, "num_failed": 2},
-    {"num_passed": 0, "num_failed": 0},
-    {"num_passed": 22, "num_failed": 0}
-  ]
-}
-```
+Export macro examples as v1 `macro_window` rows with `experiment: "exp3_macro_prm"`. All sequence fields must have exactly `window_size` elements: `state_sequence`, `action_sequence`, `observation_sequence`, `solidity_ast_diffs`, `compile_status_sequence`, and `test_status_sequence`. Each non-null test status object must include `num_passed`, `num_failed`, and `num_errors`.
 
 ### Model architecture (EVM-MacroPRM-1.5B-v0)
 
@@ -616,38 +468,7 @@ def derive_controller_label(trajectory_branch, all_branches_at_same_task):
 
 ### Schema: ForestController-EVM-v0
 
-```json
-{
-  "experiment": "exp4_controller",
-  "task_id": "evmbench/<audit_id>",
-  "mode": "detect",
-  "step_idx": 12,
-
-  "forest_state": {
-    "num_workers": 8,
-    "step_budget_used": 47,
-    "best_prm_score": 0.81,
-    "score_entropy": 0.19,
-    "worker_disagreement": 0.67,
-    "compile_success_rate": 0.5,
-    "unique_files_touched": 9,
-    "duplicate_action_rate": 0.31,
-    "branch_depths": [3, 5, 2, 7, 4],
-    "current_best_score": 0.81,
-    "avg_worker_progress": 4.2
-  },
-
-  "controller_action": "STOP_AND_SUBMIT",
-  "action_rationale": "top branch achieved terminal success, no need for more samples",
-
-  "outcome": {
-    "terminal_success": true,
-    "terminal_score": 1.0,
-    "total_cost_usd": 0.82,
-    "workers_used": 8
-  }
-}
-```
+Export controller examples as v1 `controller_state` rows with `experiment: "exp4_controller"`. The allowed `controller_action` values are defined in `SCHEMA.md`; `forest_state` and `outcome` must use only the validator-supported fields. Additional policy diagnostics belong under `extensions.exp4`.
 
 ### Controller model architecture
 
@@ -776,31 +597,7 @@ def grpo_reward_fn(completions, **kwargs):
 
 ### Schema: EVM-RLVR-Lite-v0
 
-```json
-{
-  "experiment": "exp5_rlvr_lite",
-  "task_id": "evmbench/<audit_id>",
-  "mode": "detect",
-  "stage": "sft | dpo | grpo",
-
-  "trajectory": [...],  // same as ForestTrace schema
-  "policy_version": "sft_v0 | dpo_v0 | grpo_v0",
-
-  "reward_breakdown": {
-    "compile_success": 1.0,
-    "test_pass_rate": 0.85,
-    "terminal_success": 1.0,
-    "total": 0.95
-  },
-
-  "training_metadata": {
-    "learning_rate": 1e-5,
-    "batch_size": 4,
-    "num_epochs": 2,
-    "gpu_hours": 0.8
-  }
-}
-```
+RLVR training metadata is not a separate v1 row type. For the v1 public artifact, encode per-step data as `decision_point` rows and branch outcomes as `branch_summary` rows with `experiment: "exp5_rlvr_lite"`, then place RLVR-only fields such as `stage`, `policy_version`, `reward_breakdown`, and `training_metadata` under namespaced `extensions.exp5`. If RLVR needs a first-class top-level schema later, introduce it with a `schema_version` bump.
 
 ### Evaluation under fixed budget
 

@@ -111,8 +111,10 @@ SCOUT_SYSTEM_TEMPLATE = """You are the scout for an EVMBench forest-of-auditors 
 You use the mini-swe-agent shell interface to inspect the audit target, map the
 attack surface, and choose which specialist audit trees should receive budget."""
 
-SCOUT_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md for the benchmark instructions.
-Then inspect /home/agent/audit enough to identify the dominant protocol surfaces.
+SCOUT_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md and
+/home/agent/AUDIT_SCOPE.md for the benchmark instructions and scoped target
+file list. Then inspect only the scoped file(s) present under /home/agent/audit
+enough to identify the dominant protocol surfaces.
 
 Write both scout artifacts:
 

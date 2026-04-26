@@ -4,6 +4,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MINI_AGENT_DIR = PROJECT_ROOT / "evmbench" / "agents" / "mini-swe-agent"
 if str(MINI_AGENT_DIR) not in sys.path:
@@ -28,10 +30,10 @@ modal_baseline = load_agent_module("modal_baseline")
 modal_forest = load_agent_module("modal_forest")
 
 
-def make_forest_config(tmp_path: Path, *, branches_per_tree: int = 2) -> Any:
+def make_forest_config(tmp_path: Path, *, branches_per_tree: int = 2, mode: str = "detect") -> Any:
     return modal_forest.ForestConfig(
         audit_id="2026-01-tempo-stablecoin-dex",
-        mode="detect",
+        mode=mode,
         hint_level="none",
         findings_subdir="",
         image="evmbench/audit:2026-01-tempo-stablecoin-dex",
@@ -141,6 +143,30 @@ def test_global_judge_is_only_spec_that_extracts_submission(tmp_path: Path) -> N
     assert global_spec.audit_scope_files == ("src/Pool.sol",)
 
 
+def test_final_artifact_contract_is_mode_aware(tmp_path: Path) -> None:
+    roles = [scout.get_tree_role("token-flow")]
+
+    detect_spec = modal_forest._global_judge_spec(
+        make_forest_config(tmp_path / "detect", mode="detect"),
+        roles,
+        (),
+    )
+    patch_spec = modal_forest._global_judge_spec(
+        make_forest_config(tmp_path / "patch", mode="patch"),
+        roles,
+        ("src/Pool.sol",),
+    )
+    exploit_spec = modal_forest._global_judge_spec(
+        make_forest_config(tmp_path / "exploit", mode="exploit"),
+        roles,
+        (),
+    )
+
+    assert detect_spec.output_path == "/home/agent/submission/audit.md"
+    assert patch_spec.output_path == "/home/agent/submission/agent.diff"
+    assert exploit_spec.output_path == "/home/agent/submission/txs.json"
+
+
 def test_tree_judge_stages_existing_and_missing_branch_reports(tmp_path: Path) -> None:
     config = make_forest_config(tmp_path)
     role = scout.get_tree_role("token-flow")
@@ -158,6 +184,37 @@ def test_audit_scope_files_come_from_patch_mappings() -> None:
     audit = modal_forest.audit_registry.get_audit("2023-07-pooltogether")
 
     assert modal_forest._audit_scope_files(audit) == ("vault/src/Vault.sol",)
+
+
+def test_detect_audit_without_patch_mapping_uses_full_workspace_scope() -> None:
+    audit = modal_forest.audit_registry.get_audit("2024-01-canto")
+
+    assert modal_forest._audit_scope_files(audit, "detect") == ()
+
+
+def test_patch_audit_without_patch_mapping_is_rejected() -> None:
+    audit = modal_forest.audit_registry.get_audit("2024-01-canto")
+
+    with pytest.raises(RuntimeError, match="patch-mode focus metadata"):
+        modal_forest._audit_scope_files(audit, "patch")
+
+
+def test_modal_forest_config_parses_all_modes(tmp_path: Path) -> None:
+    parser = modal_forest.build_arg_parser()
+
+    for mode in ("detect", "patch", "exploit"):
+        args = parser.parse_args(
+            [
+                "--audit-id",
+                "2023-07-pooltogether",
+                "--mode",
+                mode,
+                "--output-dir",
+                str(tmp_path / mode),
+            ]
+        )
+        config = modal_forest.config_from_args(args)
+        assert config.mode == mode
 
 
 def test_modal_baseline_config_injects_vllm_api_base(tmp_path: Path, monkeypatch) -> None:

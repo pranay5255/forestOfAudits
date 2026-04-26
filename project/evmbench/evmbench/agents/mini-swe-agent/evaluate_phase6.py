@@ -9,6 +9,7 @@ import csv
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -23,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from evmbench.utils import get_timestamp
 
+Mode = Literal["detect", "patch", "exploit"]
 Scope = Literal["smoke", "first5", "first20"]
 
 
@@ -38,6 +40,7 @@ class Phase6Run:
     runner: str
     agent_id: str
     audit_id: str
+    mode: Mode
     runs_dir: Path
     command: tuple[str, ...]
 
@@ -72,6 +75,26 @@ AVAILABLE_RUNNERS: tuple[RunnerSpec, ...] = (
         "mini-swe-agent-modal-forest-gpt-5.2-codex-8trees",
         "Modal forest/TTS GPT-5.2 Codex 8-tree",
     ),
+    RunnerSpec(
+        "modal-forest-gpt52-codex-2trees-debug",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug",
+        "Modal forest/TTS GPT-5.2 Codex 2-tree debug",
+    ),
+    RunnerSpec(
+        "modal-forest-gpt52-codex-4trees-debug",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-4trees-debug",
+        "Modal forest/TTS GPT-5.2 Codex 4-tree debug",
+    ),
+    RunnerSpec(
+        "modal-baseline-qwen-vllm",
+        "mini-swe-agent-modal-baseline-qwen-vllm",
+        "Modal baseline with Qwen vLLM",
+    ),
+    RunnerSpec(
+        "modal-forest-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm",
+        "Modal forest/TTS with Qwen vLLM",
+    ),
 )
 
 RUNNER_GROUPS: dict[str, tuple[RunnerSpec, ...]] = {
@@ -98,6 +121,25 @@ RUNNER_GROUPS: dict[str, tuple[RunnerSpec, ...]] = {
         AVAILABLE_RUNNERS[5],
         AVAILABLE_RUNNERS[7],
     ),
+    "forest-debug": (
+        AVAILABLE_RUNNERS[7],
+        AVAILABLE_RUNNERS[9],
+        AVAILABLE_RUNNERS[10],
+    ),
+    "modal-debug": (
+        AVAILABLE_RUNNERS[5],
+        AVAILABLE_RUNNERS[7],
+        AVAILABLE_RUNNERS[9],
+        AVAILABLE_RUNNERS[10],
+    ),
+    "vllm": (
+        AVAILABLE_RUNNERS[11],
+        AVAILABLE_RUNNERS[12],
+    ),
+    "modal-vllm": (
+        AVAILABLE_RUNNERS[11],
+        AVAILABLE_RUNNERS[12],
+    ),
 }
 
 
@@ -109,13 +151,13 @@ def default_output_root() -> Path:
     return project_root() / "runs" / "phase6" / get_timestamp()
 
 
-def read_detect_audits() -> list[str]:
-    split_path = project_root() / "splits" / "detect-tasks.txt"
+def read_audits_for_mode(mode: Mode) -> list[str]:
+    split_path = project_root() / "splits" / f"{mode}-tasks.txt"
     return [line.strip() for line in split_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def audits_for_scope(scope: Scope) -> list[str]:
-    audits = read_detect_audits()
+def audits_for_scope(scope: Scope, mode: Mode = "detect") -> list[str]:
+    audits = read_audits_for_mode(mode)
     if scope == "smoke":
         return audits[:1]
     if scope == "first5":
@@ -125,9 +167,9 @@ def audits_for_scope(scope: Scope) -> list[str]:
     raise ValueError(f"Unsupported Phase 6 scope: {scope!r}")
 
 
-def parse_audit_list(raw: str | None, scope: Scope) -> list[str]:
+def parse_audit_list(raw: str | None, scope: Scope, mode: Mode = "detect") -> list[str]:
     if not raw:
-        return audits_for_scope(scope)
+        return audits_for_scope(scope, mode)
     audits = [part.strip() for part in raw.split(",") if part.strip()]
     if not audits:
         raise ValueError("--audits did not contain any audit IDs.")
@@ -170,7 +212,12 @@ def parse_runner_list(raw: str | None) -> list[RunnerSpec]:
     return _dedupe_runners(runners)
 
 
-def build_evmbench_command(agent_id: str, audit_id: str, runs_dir: Path) -> tuple[str, ...]:
+def build_evmbench_command(
+    agent_id: str,
+    audit_id: str,
+    runs_dir: Path,
+    mode: Mode = "detect",
+) -> tuple[str, ...]:
     return (
         "uv",
         "run",
@@ -178,7 +225,8 @@ def build_evmbench_command(agent_id: str, audit_id: str, runs_dir: Path) -> tupl
         "-m",
         "evmbench.nano.entrypoint",
         f"evmbench.audit={audit_id}",
-        "evmbench.mode=detect",
+        f"evmbench.mode={mode}",
+        f"evmbench.audit_split={mode}-tasks",
         "evmbench.hint_level=none",
         "evmbench.log_to_run_dir=True",
         f"evmbench.runs_dir={runs_dir}",
@@ -192,10 +240,11 @@ def build_run_matrix(
     *,
     output_root: Path,
     scope: Scope = "first5",
+    mode: Mode = "detect",
     audits: list[str] | None = None,
     runners: list[RunnerSpec] | None = None,
 ) -> list[Phase6Run]:
-    selected_audits = audits or audits_for_scope(scope)
+    selected_audits = audits or audits_for_scope(scope, mode)
     selected_runners = runners or list(DEFAULT_RUNNERS)
     matrix: list[Phase6Run] = []
     for runner in selected_runners:
@@ -206,8 +255,9 @@ def build_run_matrix(
                     runner=runner.slug,
                     agent_id=runner.agent_id,
                     audit_id=audit_id,
+                    mode=mode,
                     runs_dir=runs_dir,
-                    command=build_evmbench_command(runner.agent_id, audit_id, runs_dir),
+                    command=build_evmbench_command(runner.agent_id, audit_id, runs_dir, mode),
                 )
             )
     return matrix
@@ -224,6 +274,7 @@ def matrix_payload(output_root: Path, scope: Scope, matrix: list[Phase6Run]) -> 
     return {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scope": scope,
+        "mode": matrix[0].mode if matrix else "detect",
         "output_root": str(output_root),
         "runners": [asdict(runner) for runner in _dedupe_runners(selected_runners)],
         "runner_catalog": [asdict(runner) for runner in AVAILABLE_RUNNERS],
@@ -259,7 +310,24 @@ def command_log_dir(output_root: Path, item: Phase6Run) -> Path:
 
 
 def command_status_path(output_root: Path, item: Phase6Run) -> Path:
-    return command_log_dir(output_root, item) / f"{item.audit_id}.json"
+    filename = f"{item.audit_id}.json" if item.mode == "detect" else f"{item.mode}-{item.audit_id}.json"
+    return command_log_dir(output_root, item) / filename
+
+
+def submission_filename(mode: Mode) -> str:
+    if mode == "detect":
+        return "audit.md"
+    if mode == "patch":
+        return "agent.diff"
+    if mode == "exploit":
+        return "txs.json"
+    raise ValueError(f"Unsupported mode: {mode!r}")
+
+
+def parse_mode(raw: Any) -> Mode:
+    if raw in {"detect", "patch", "exploit"}:
+        return raw
+    raise ValueError(f"Unsupported mode: {raw!r}")
 
 
 def _format_seconds(value: float | None) -> str:
@@ -302,6 +370,7 @@ def _run_command_streaming(
     *,
     stdout_log: Path,
     stderr_log: Path,
+    timeout_seconds: float | None,
 ) -> int:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -318,6 +387,7 @@ def _run_command_streaming(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         assert process.stdout is not None
         assert process.stderr is not None
@@ -347,13 +417,30 @@ def _run_command_streaming(
         stdout_thread.start()
         stderr_thread.start()
         try:
-            returncode = process.wait()
+            returncode = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            message = (
+                f"[phase6] command timed out after {_format_seconds(timeout_seconds)}; "
+                "terminating process group.\n"
+            )
+            stderr_file.write(message)
+            stderr_file.flush()
+            with lock:
+                sys.stderr.write(f"[phase6][{item.runner}/{item.audit_id}][stderr] {message}")
+                sys.stderr.flush()
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            returncode = 124
         except KeyboardInterrupt:
-            process.terminate()
+            os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
             raise
         finally:
@@ -405,7 +492,14 @@ def _print_run_summary(output_root: Path, item: Phase6Run, status: dict[str, Any
             _phase6_log(f"forest worker error ({worker.get('worker_name')}): {error}")
 
 
-def run_matrix(output_root: Path, scope: Scope, matrix: list[Phase6Run], *, stop_on_failure: bool) -> int:
+def run_matrix(
+    output_root: Path,
+    scope: Scope,
+    matrix: list[Phase6Run],
+    *,
+    stop_on_failure: bool,
+    item_timeout_seconds: float | None,
+) -> int:
     write_matrix(output_root, scope, matrix)
     overall_returncode = 0
     _phase6_log(f"matrix: {len(matrix)} run(s), scope={scope}, output_root={output_root}")
@@ -415,13 +509,18 @@ def run_matrix(output_root: Path, scope: Scope, matrix: list[Phase6Run], *, stop
         stdout_log = log_dir / f"{item.audit_id}.stdout.log"
         stderr_log = log_dir / f"{item.audit_id}.stderr.log"
         _phase6_log(
-            f"starting {index}/{len(matrix)} {item.runner}/{item.audit_id} "
+            f"starting {index}/{len(matrix)} {item.runner}/{item.audit_id} mode={item.mode} "
             f"agent={item.agent_id}"
         )
         _phase6_log(f"command: {shlex.join(item.command)}")
         _phase6_log(f"streaming logs to: {stdout_log} | {stderr_log}")
         started_at = time.time()
-        returncode = _run_command_streaming(item, stdout_log=stdout_log, stderr_log=stderr_log)
+        returncode = _run_command_streaming(
+            item,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            timeout_seconds=item_timeout_seconds,
+        )
         ended_at = time.time()
         status = {
             **item.to_dict(),
@@ -432,6 +531,8 @@ def run_matrix(output_root: Path, scope: Scope, matrix: list[Phase6Run], *, stop
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
             "streamed": True,
+            "timed_out": returncode == 124,
+            "timeout_seconds": item_timeout_seconds,
         }
         command_status_path(output_root, item).write_text(json.dumps(status, indent=2), encoding="utf-8")
         _print_run_summary(output_root, item, status)
@@ -481,6 +582,7 @@ def _load_matrix(output_root: Path) -> list[Phase6Run] | None:
                     runner=str(raw["runner"]),
                     agent_id=str(raw["agent_id"]),
                     audit_id=str(raw["audit_id"]),
+                    mode=parse_mode(raw.get("mode", "detect")),
                     runs_dir=Path(str(raw["runs_dir"])),
                     command=tuple(str(part) for part in raw["command"]),
                 )
@@ -507,6 +609,7 @@ def discover_matrix(output_root: Path) -> list[Phase6Run]:
                     runner=runner_dir.name,
                     agent_id=runner_dir.name,
                     audit_id=audit_id,
+                    mode="detect",
                     runs_dir=runner_dir,
                     command=(),
                 )
@@ -596,7 +699,7 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
     run_dir = find_run_dir(item)
     grade = parse_run_grade(run_dir)
     command_status = _command_status(output_root, item)
-    submission_path = run_dir / "submission" / "audit.md" if run_dir else None
+    submission_path = run_dir / "submission" / submission_filename(item.mode) if run_dir else None
     submission_exists = bool(submission_path and submission_path.exists() and submission_path.stat().st_size > 0)
     modal_command, modal_baseline, modal_forest = _modal_metadata(run_dir)
 
@@ -645,12 +748,14 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
                         )
 
     failure_reason = None
-    if command_status and command_status.get("returncode") not in (0, None):
+    if command_status and command_status.get("timed_out"):
+        failure_reason = f"command timed out after {_format_seconds(_float_or_none(command_status.get('timeout_seconds')))}"
+    elif command_status and command_status.get("returncode") not in (0, None):
         failure_reason = f"command exited {command_status.get('returncode')}"
     elif not run_dir:
         failure_reason = "run directory not found"
     elif not submission_exists:
-        failure_reason = "missing or empty submission/audit.md"
+        failure_reason = f"missing or empty submission/{submission_filename(item.mode)}"
     elif not grade:
         failure_reason = "grade not found in run.log"
 
@@ -658,6 +763,7 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
         "runner": item.runner,
         "agent_id": item.agent_id,
         "audit_id": item.audit_id,
+        "mode": item.mode,
         "runs_dir": str(item.runs_dir),
         "run_dir": str(run_dir) if run_dir else None,
         "command": list(item.command),
@@ -754,8 +860,8 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             "",
             "## Per Audit",
             "",
-            "| Runner | Audit | Submission | Score | Detect Award | Runtime | Failure | Run Dir |",
-            "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+            "| Runner | Mode | Audit | Submission | Score | Detect Award | Runtime | Failure | Run Dir |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for row in rows:
@@ -774,6 +880,7 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             + " | ".join(
                 [
                     str(row["runner"]),
+                    str(row.get("mode", "detect")),
                     str(row["audit_id"]),
                     "yes" if row.get("submission_exists") else "no",
                     score,
@@ -843,6 +950,7 @@ def _slide_audit_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "runner": row.get("runner"),
             "agent_id": row.get("agent_id"),
+            "mode": row.get("mode", "detect"),
             "audit_id": row.get("audit_id"),
             "submission_exists": row.get("submission_exists"),
             "score": row.get("score"),
@@ -907,6 +1015,7 @@ def write_slide_data(output_root: Path, slide_data: dict[str, Any]) -> None:
         "agent_id",
         "audit_id",
         "submission_exists",
+        "mode",
         "score",
         "max_score",
         "score_percentage",
@@ -949,6 +1058,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_matrix_args(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument("--mode", choices=["detect", "patch", "exploit"], default="detect")
         subparser.add_argument("--scope", choices=["smoke", "first5", "first20"], default="first5")
         subparser.add_argument("--audits", help="Comma-separated audit IDs. Overrides --scope.")
         subparser.add_argument(
@@ -969,6 +1079,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run the Phase 6 command matrix.")
     add_matrix_args(run_parser)
     run_parser.add_argument("--stop-on-failure", action="store_true")
+    run_parser.add_argument(
+        "--item-timeout-seconds",
+        type=float,
+        default=float(os.getenv("PHASE6_ITEM_TIMEOUT_SECONDS", "0") or "0"),
+        help="Wall-clock timeout per matrix item. Use 0 to disable.",
+    )
 
     summarize_parser = subparsers.add_parser("summarize", help="Summarize an existing Phase 6 output root.")
     summarize_parser.add_argument("--output-root", type=Path, required=True)
@@ -977,10 +1093,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, Scope, list[Phase6Run]]:
     scope = args.scope
+    mode = parse_mode(args.mode)
     output_root = (args.output_root or default_output_root()).resolve()
-    audits = parse_audit_list(args.audits, scope)
+    audits = parse_audit_list(args.audits, scope, mode)
     runners = parse_runner_list(args.runners)
-    return output_root, scope, build_run_matrix(output_root=output_root, scope=scope, audits=audits, runners=runners)
+    return output_root, scope, build_run_matrix(
+        output_root=output_root,
+        scope=scope,
+        mode=mode,
+        audits=audits,
+        runners=runners,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -993,12 +1116,20 @@ def main(argv: list[str] | None = None) -> int:
         output_root, scope, matrix = _matrix_from_args(args)
         print(f"# Phase 6 output root: {output_root}")
         print(f"# Scope: {scope}")
+        print(f"# Mode: {args.mode}")
         print_plan(matrix)
         return 0
     if args.command == "run":
         output_root, scope, matrix = _matrix_from_args(args)
         print(f"Writing Phase 6 outputs to {output_root}")
-        return run_matrix(output_root, scope, matrix, stop_on_failure=args.stop_on_failure)
+        item_timeout_seconds = args.item_timeout_seconds if args.item_timeout_seconds > 0 else None
+        return run_matrix(
+            output_root,
+            scope,
+            matrix,
+            stop_on_failure=args.stop_on_failure,
+            item_timeout_seconds=item_timeout_seconds,
+        )
     if args.command == "summarize":
         payload = summarize_phase6(args.output_root)
         print(json.dumps({"output_root": payload["output_root"], "n_rows": len(payload["rows"])}, indent=2))

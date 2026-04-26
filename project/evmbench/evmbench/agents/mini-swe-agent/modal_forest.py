@@ -39,8 +39,9 @@ from judge import (
     branch_diff_remote_path,
     branch_id,
     branch_inputs_remote_dir,
-    branch_txs_remote_path,
+    branch_mode_notes,
     branch_report_remote_path,
+    branch_txs_remote_path,
     build_branch_system_template,
     build_branch_task,
     build_global_judge_system_template,
@@ -50,7 +51,6 @@ from judge import (
     build_tree_judge_task,
     final_submission_path,
     global_mode_notes,
-    branch_mode_notes,
     local_branch_diff_path,
     local_branch_report_path,
     local_branch_txs_path,
@@ -225,21 +225,25 @@ def _audit_relative_path(remote_path: str) -> str:
     return rel_path
 
 
-def _audit_scope_files(audit: Audit) -> tuple[str, ...]:
+def _audit_scope_files(audit: Audit, mode: Mode = "detect") -> tuple[str, ...]:
+    if mode == "exploit":
+        return ()
     files: list[str] = []
     for vulnerability in audit.vulnerabilities:
         for remote_path in (vulnerability.patch_path_mapping or {}).values():
             files.append(_audit_relative_path(remote_path))
     scoped = tuple(sorted(dict.fromkeys(files)))
-    if not scoped:
+    if not scoped and mode == "patch":
         raise RuntimeError(
             f"Audit {audit.id} does not define patch_path_mapping entries; "
-            "modal forest cannot build a file-scoped workspace."
+            "modal forest cannot build patch-mode focus metadata."
         )
     return scoped
 
 
 def _branch_scope_files(config: ForestConfig, audit_scope_files: tuple[str, ...]) -> tuple[str, ...]:
+    if not audit_scope_files:
+        return tuple("" for _ in range(config.branches_per_tree))
     return tuple(
         scope_file
         for scope_file in audit_scope_files
@@ -248,33 +252,51 @@ def _branch_scope_files(config: ForestConfig, audit_scope_files: tuple[str, ...]
 
 
 def _scope_file_text(scope_files: Iterable[str]) -> str:
-    files = tuple(scope_files)
+    files = tuple(path for path in scope_files if path)
+    if not files:
+        return "\n".join(
+            [
+                "# Audit Scope",
+                "",
+                "The full /home/agent/audit workspace is in scope for this forest worker.",
+                "Use /home/agent/AGENTS.md for the benchmark instructions and scope boundaries.",
+                "",
+            ]
+        )
     lines = [
         "# Audit Scope",
         "",
-        "The /home/agent/audit directory has been reduced to only these target files:",
+        "Prioritize these target file(s) while using the full workspace for context, builds, tests, and exploit execution:",
         "",
     ]
     lines.extend(f"- {path}" for path in files)
     lines.extend(
         [
             "",
-            "Do not inspect, infer, reconstruct, or search for other audit files.",
-            "All findings and references must come from the scoped file(s) above and staged reports.",
+            "Do not ignore surrounding code when it is needed to understand or verify behavior.",
+            "Keep final claims tied to the benchmark scope from /home/agent/AGENTS.md.",
             "",
         ]
     )
     return "\n".join(lines)
 
 
-def _scoped_agent_instructions(instructions: str) -> str:
+def _scoped_agent_instructions(instructions: str, scope_files: tuple[str, ...]) -> str:
+    if not scope_files:
+        scope_note = (
+            "For this forest run, /home/agent/AUDIT_SCOPE.md confirms that the "
+            "full /home/agent/audit workspace is in scope.\n"
+        )
+    else:
+        scope_note = (
+            "For this forest run, /home/agent/AUDIT_SCOPE.md lists priority "
+            "target files. The full /home/agent/audit workspace remains available "
+            "for context, builds, tests, and exploit execution.\n"
+        )
     return (
         instructions.rstrip()
         + "\n\nForest workspace override:\n"
-        + "For this forest run, /home/agent/audit has been physically reduced to "
-        + "the file(s) listed in /home/agent/AUDIT_SCOPE.md. The original README "
-        + "and other repository files may be absent by design. Do not search for, "
-        + "reconstruct, or infer from files outside that scope.\n"
+        + scope_note
     )
 
 
@@ -297,6 +319,8 @@ def _write_metadata(
 ) -> None:
     config.metadata_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "mode": config.mode,
+        "final_artifact_path": str(_local_final_artifact_path(config)),
         "config": _json_ready_config(config),
         "scout_decision": scout_decision.to_dict() if scout_decision else None,
         "selected_roles": list(selected_roles),
@@ -307,6 +331,30 @@ def _write_metadata(
         "runtime_seconds": ended_at - started_at,
     }
     config.metadata_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def _local_final_artifact_path(config: ForestConfig) -> Path:
+    return config.output_dir / "submission" / Path(final_submission_path(config.mode)).name
+
+
+def _local_path_for_remote(output_dir: Path, remote_path: str) -> Path | None:
+    for remote_root, local_root in (
+        (f"{AGENT_DIR}/", output_dir),
+        (f"{SUBMISSION_DIR}/", output_dir / "submission"),
+    ):
+        if remote_path.startswith(remote_root):
+            rel = remote_path[len(remote_root):]
+            return local_root / rel
+    return None
+
+
+def _existing_local_artifact_paths(output_dir: Path, spec: WorkerSpec) -> tuple[str, ...]:
+    paths: list[str] = []
+    for remote_path in spec.artifact_paths or ((spec.output_path,) if spec.output_path else ()):
+        local_path = _local_path_for_remote(output_dir, remote_path)
+        if local_path and local_path.exists():
+            paths.append(str(local_path))
+    return tuple(paths)
 
 
 def _make_env(config: ForestConfig, image: str, openai_api_key: str) -> Any:
@@ -409,7 +457,7 @@ PY"""
     _log(f"extracted worker outputs worker={worker_name} output_dir={output_dir}")
 
 
-def _verify_worker_contract(env: Any, spec: WorkerSpec) -> None:
+def _verify_worker_contract(env: Any, spec: WorkerSpec, mode: Mode) -> None:
     if spec.output_path:
         _run_remote(
             env,
@@ -418,8 +466,72 @@ def _verify_worker_contract(env: Any, spec: WorkerSpec) -> None:
             timeout=30,
         )
     if spec.forbid_submission:
-        command = f"test ! -e {shlex.quote(FINAL_SUBMISSION_PATH)}"
+        command = f"test ! -e {shlex.quote(final_submission_path(mode))}"
         _run_remote(env, command, f"verify {spec.worker_name} did not write final submission", timeout=30)
+
+
+def _capture_branch_patch_diff(env: Any, audit: Audit, spec: WorkerSpec) -> None:
+    if not (spec.role and spec.branch_index is not None):
+        return
+    if not audit.base_commit:
+        return
+    diff_path = branch_diff_remote_path(spec.role, spec.branch_index)
+    command = (
+        f"set -eu\n"
+        f"mkdir -p {shlex.quote(str(Path(diff_path).parent))}\n"
+        f"cd {shlex.quote(AUDIT_DIR)}\n"
+        "git add -N .\n"
+        f"git -c core.fileMode=false diff --binary {shlex.quote(audit.base_commit)} > {shlex.quote(diff_path)}\n"
+    )
+    _run_remote(env, command, f"capture candidate patch diff for {spec.worker_name}", timeout=300, check=False)
+
+
+def _capture_branch_exploit_txs(
+    env: Any,
+    audit: Audit,
+    spec: WorkerSpec,
+    ploit_toml: str | None,
+) -> None:
+    if not (spec.role and spec.branch_index is not None):
+        return
+    txs_path = branch_txs_remote_path(spec.role, spec.branch_index)
+    try:
+        _postprocess_mode(env, audit, "exploit", ploit_toml)
+        command = (
+            f"set -eu\n"
+            f"mkdir -p {shlex.quote(str(Path(txs_path).parent))}\n"
+            f"cp {shlex.quote(final_submission_path('exploit'))} {shlex.quote(txs_path)}\n"
+            f"rm -f {shlex.quote(final_submission_path('exploit'))}\n"
+        )
+        _run_remote(env, command, f"capture candidate exploit txs for {spec.worker_name}", timeout=60)
+    except Exception as exc:
+        _remote_write_text(
+            env,
+            f"{txs_path}.error.txt",
+            f"Candidate transaction extraction failed for {spec.worker_name}: {exc}\n",
+            f"record candidate exploit tx extraction failure for {spec.worker_name}",
+        )
+        _run_remote(
+            env,
+            f"rm -f {shlex.quote(final_submission_path('exploit'))}",
+            f"remove incomplete exploit submission for {spec.worker_name}",
+            check=False,
+        )
+
+
+def _capture_branch_mode_artifacts(
+    env: Any,
+    audit: Audit,
+    config: ForestConfig,
+    spec: WorkerSpec,
+    ploit_toml: str | None,
+) -> None:
+    if spec.worker_type != "branch":
+        return
+    if config.mode == "patch":
+        _capture_branch_patch_diff(env, audit, spec)
+    elif config.mode == "exploit":
+        _capture_branch_exploit_txs(env, audit, spec, ploit_toml)
 
 
 def _run_worker(
@@ -444,14 +556,12 @@ def _run_worker(
     try:
         _log(f"worker prepare remote workspace {label}")
         _prepare_remote_workspace(env)
-        _stage_rendered_instructions(env, _scoped_agent_instructions(instructions))
+        _stage_rendered_instructions(env, _scoped_agent_instructions(instructions, spec.audit_scope_files))
         for remote_path, text in spec.staged_files.items():
             _log(f"worker stage file {label} remote_path={remote_path} bytes={len(text.encode('utf-8'))}")
             _remote_write_text(env, remote_path, text, f"stage {remote_path}")
 
         ploit_toml = _prepare_mode(env, audit, config.mode)
-        _log(f"worker restrict audit scope {label} files={','.join(spec.audit_scope_files)}")
-        _restrict_remote_audit_workspace(env, spec.audit_scope_files, label)
         _log(f"worker run agent {label}")
         model = LitellmModel(
             model_name=spec.model_name,
@@ -468,11 +578,12 @@ def _run_worker(
             output_path=spec.trajectory_path,
         )
         result = agent.run(spec.task, **spec.template_vars)
-        _log(f"worker verify outputs {label}")
-        _verify_worker_contract(env, spec)
+        _capture_branch_mode_artifacts(env, audit, config, spec, ploit_toml)
         if spec.include_submission:
             _log(f"worker postprocess final submission {label}")
             _postprocess_mode(env, audit, config.mode, ploit_toml)
+        _log(f"worker verify outputs {label}")
+        _verify_worker_contract(env, spec, config.mode)
         _extract_worker_outputs(env, config.output_dir, spec.worker_name, include_submission=spec.include_submission)
     except Exception as exc:
         error = str(exc)
@@ -488,6 +599,7 @@ def _run_worker(
         _log(f"worker finish {label} status={status} runtime={_format_seconds(ended_at - started_at)}")
 
     return WorkerResult(
+        mode=config.mode,
         worker_type=spec.worker_type,
         worker_name=spec.worker_name,
         role=spec.role.name if spec.role else None,
@@ -498,6 +610,8 @@ def _run_worker(
         started_at=started_at,
         ended_at=ended_at,
         output_path=spec.output_path,
+        final_artifact_path=final_submission_path(config.mode) if spec.include_submission else None,
+        extracted_artifact_paths=_existing_local_artifact_paths(config.output_dir, spec),
         audit_scope_files=spec.audit_scope_files,
     )
 
@@ -524,6 +638,18 @@ def _stage_branch_reports(
             ),
         )
         staged[f"{branch_inputs_remote_dir(role)}/{branch_id(index)}.md"] = report
+        if config.mode == "patch":
+            diff = _read_local_text(
+                local_branch_diff_path(config.output_dir, role, index),
+                missing_text=f"# Missing Candidate Diff\n\nNo candidate diff was extracted for {role.name} {branch_id(index)}.\n",
+            )
+            staged[f"{branch_inputs_remote_dir(role)}/{branch_id(index)}.diff"] = diff
+        elif config.mode == "exploit":
+            txs = _read_local_text(
+                local_branch_txs_path(config.output_dir, role, index),
+                missing_text=f'{{"missing": true, "worker": "{role.name}-{branch_id(index)}"}}\n',
+            )
+            staged[f"{branch_inputs_remote_dir(role)}/{branch_id(index)}.txs.json"] = txs
     return staged
 
 
@@ -551,6 +677,7 @@ def _worker_specs_for_branches(
         for index, scope_file in enumerate(branch_scopes, start=1):
             branch = branch_id(index)
             output_path = branch_report_remote_path(role, index)
+            spec_scope = (scope_file,) if scope_file else ()
             specs.append(
                 WorkerSpec(
                     worker_type="branch",
@@ -559,19 +686,22 @@ def _worker_specs_for_branches(
                     branch_index=index,
                     system_template=build_branch_system_template(role, index, branch_count),
                     instance_template=BRANCH_INSTANCE_TEMPLATE,
-                    task=build_branch_task(role, index, branch_count, config.task),
+                    task=build_branch_task(role, index, branch_count, config.task, config.mode),
                     model_name=config.branch_model,
                     step_limit=config.branch_step_limit,
                     cost_limit=config.branch_cost_limit,
                     trajectory_path=config.output_dir / "logs" / "forest" / role.name / f"{branch}.traj.json",
                     output_path=output_path,
+                    artifact_paths=branch_artifact_remote_paths(role, index, config.mode),
                     staged_files={
                         f"{AGENT_DIR}/FOREST_ROLE.md": build_role_file(role),
-                        AUDIT_SCOPE_PATH: _scope_file_text((scope_file,)),
+                        AUDIT_SCOPE_PATH: _scope_file_text(spec_scope),
                     },
-                    audit_scope_files=(scope_file,),
+                    audit_scope_files=spec_scope,
                     template_vars={
+                        "mode": config.mode,
                         "branch_output_path": output_path,
+                        "branch_mode_notes": branch_mode_notes(config.mode, role, index),
                     },
                 )
             )
@@ -593,12 +723,13 @@ def _worker_specs_for_tree_judges(
                 role=role,
                 system_template=build_tree_judge_system_template(role),
                 instance_template=TREE_JUDGE_INSTANCE_TEMPLATE,
-                task=build_tree_judge_task(role, config.task),
+                task=build_tree_judge_task(role, config.task, config.mode),
                 model_name=config.judge_model,
                 step_limit=config.judge_step_limit,
                 cost_limit=config.judge_cost_limit,
                 trajectory_path=config.output_dir / "logs" / "forest" / role.name / "judge.traj.json",
                 output_path=output_path,
+                artifact_paths=(output_path,),
                 staged_files={
                     f"{AGENT_DIR}/FOREST_ROLE.md": build_role_file(role),
                     AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files),
@@ -606,6 +737,7 @@ def _worker_specs_for_tree_judges(
                 },
                 audit_scope_files=audit_scope_files,
                 template_vars={
+                    "mode": config.mode,
                     "branch_inputs_dir": branch_inputs_remote_dir(role),
                     "judge_output_path": output_path,
                 },
@@ -626,6 +758,7 @@ def _scout_spec(config: ForestConfig, audit_scope_files: tuple[str, ...]) -> Wor
         cost_limit=config.scout_cost_limit,
         trajectory_path=config.output_dir / "logs" / "forest" / "scout.traj.json",
         output_path=f"{AGENT_DIR}/forest/scout/scout.md",
+        artifact_paths=(f"{AGENT_DIR}/forest/scout/scout.md",),
         staged_files={AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files)},
         audit_scope_files=audit_scope_files,
         template_vars={
@@ -639,24 +772,29 @@ def _global_judge_spec(
     roles: Iterable[TreeRole],
     audit_scope_files: tuple[str, ...],
 ) -> WorkerSpec:
+    output_path = final_submission_path(config.mode)
     return WorkerSpec(
         worker_type="global_judge",
         worker_name="global-judge",
-        system_template=build_global_judge_system_template(),
+        system_template=build_global_judge_system_template(config.mode),
         instance_template=GLOBAL_JUDGE_INSTANCE_TEMPLATE,
-        task=build_global_judge_task(config.task),
+        task=build_global_judge_task(config.task, config.mode),
         model_name=config.global_model,
         step_limit=config.global_step_limit,
         cost_limit=config.global_cost_limit,
         trajectory_path=config.output_dir / "logs" / "forest" / "global-judge.traj.json",
-        output_path=FINAL_SUBMISSION_PATH,
+        output_path=output_path,
+        artifact_paths=(output_path,),
         staged_files={
             AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files),
             **_stage_tree_reports(config.output_dir, roles),
         },
         audit_scope_files=audit_scope_files,
         template_vars={
+            "mode": config.mode,
             "tree_reports_dir": tree_reports_remote_dir(),
+            "final_submission_path": output_path,
+            "global_mode_notes": global_mode_notes(config.mode),
         },
         include_submission=True,
         forbid_submission=False,
@@ -704,6 +842,7 @@ def _run_specs_parallel(
                 _log(f"worker batch captured error name={spec.worker_name} error={exc}")
                 results.append(
                     WorkerResult(
+                        mode=config.mode,
                         worker_type=spec.worker_type,
                         worker_name=spec.worker_name,
                         role=spec.role.name if spec.role else None,
@@ -714,6 +853,9 @@ def _run_specs_parallel(
                         started_at=now,
                         ended_at=now,
                         output_path=spec.output_path,
+                        final_artifact_path=final_submission_path(config.mode) if spec.include_submission else None,
+                        extracted_artifact_paths=_existing_local_artifact_paths(config.output_dir, spec),
+                        audit_scope_files=spec.audit_scope_files,
                     )
                 )
     sorted_results = sorted(results, key=lambda item: item.worker_name)
@@ -780,10 +922,10 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     )
 
     audit, instructions = _load_audit_for_mode(cast(Any, config))
-    audit_scope_files = _audit_scope_files(audit)
+    audit_scope_files = _audit_scope_files(audit, config.mode)
     _log(
         "audit scope files: "
-        + ", ".join(audit_scope_files)
+        + (", ".join(audit_scope_files) if audit_scope_files else "<full workspace>")
         + f" (branch_workers_per_tree={len(_branch_scope_files(config, audit_scope_files))})"
     )
     started_at = time.time()
@@ -859,13 +1001,15 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             continue_on_error=config.continue_on_worker_error,
         )
 
-        final_report = config.output_dir / "submission" / "audit.md"
-        if config.mode == "detect" and not final_report.exists():
-            raise RuntimeError(f"Forest final submission was not extracted: {final_report}")
-        _log(f"final submission ready path={final_report}")
+        final_artifact = _local_final_artifact_path(config)
+        if not final_artifact.exists():
+            raise RuntimeError(f"Forest final submission was not extracted: {final_artifact}")
+        _log(f"final submission ready path={final_artifact}")
 
         return {
+            "mode": config.mode,
             "output_dir": str(config.output_dir),
+            "final_artifact_path": str(final_artifact),
             "selected_roles": [role.name for role in selected_roles],
             "audit_scope_files": list(audit_scope_files),
             "workers": [worker.to_dict() for worker in worker_results],
@@ -905,7 +1049,7 @@ def _positive_int(raw: str) -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audit-id", required=True, help="EVMBench audit id, e.g. 2024-01-canto.")
-    parser.add_argument("--mode", choices=["detect"], default="detect")
+    parser.add_argument("--mode", choices=["detect", "patch", "exploit"], default="detect")
     parser.add_argument("--hint-level", choices=["none", "low", "med", "high", "max"], default="none")
     parser.add_argument("--findings-subdir", choices=["", "low", "medium", "high"], default="")
     parser.add_argument("--image", help="Audit image to run. Defaults to the audit config docker_image.")
@@ -969,8 +1113,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> ForestConfig:
-    if args.mode != "detect":
-        raise ValueError("Modal forest currently supports detect mode only.")
     audit = audit_registry.get_audit(args.audit_id, findings_subdir=args.findings_subdir)
     image = args.image or audit.docker_image
     if args.image_version and not args.image:

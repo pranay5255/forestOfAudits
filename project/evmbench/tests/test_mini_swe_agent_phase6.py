@@ -117,6 +117,28 @@ def test_phase6_plan_emits_default_runner_matrix(tmp_path: Path, capsys) -> None
     assert "2024-01-curves" in output
 
 
+def test_phase6_builds_mode_specific_commands(tmp_path: Path) -> None:
+    runner = phase6.RunnerSpec("modal-forest", "mini-swe-agent-modal-forest", "Modal forest")
+
+    for mode, audit_id in (
+        ("detect", "2024-01-canto"),
+        ("patch", "2023-07-pooltogether"),
+        ("exploit", "2023-07-pooltogether"),
+    ):
+        matrix = phase6.build_run_matrix(
+            output_root=tmp_path / mode,
+            scope="smoke",
+            mode=mode,
+            audits=[audit_id],
+            runners=[runner],
+        )
+        command = matrix[0].command
+        assert matrix[0].mode == mode
+        assert f"evmbench.mode={mode}" in command
+        assert f"evmbench.audit_split={mode}-tasks" in command
+        assert f"evmbench.audit={audit_id}" in command
+
+
 def test_phase6_runner_groups_cover_presentation_smoke_and_all_variants() -> None:
     presentation = {runner.agent_id for runner in phase6.parse_runner_list("presentation")}
     smoke = {runner.agent_id for runner in phase6.parse_runner_list("smoke")}
@@ -242,6 +264,31 @@ def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: P
     assert "runner,agent_id,audit_id,submission_exists" in (
         output_root / "phase6-slide-data.csv"
     ).read_text(encoding="utf-8")
+
+
+def test_phase6_summary_uses_mode_specific_submission_artifact(tmp_path: Path) -> None:
+    output_root = tmp_path / "phase6"
+    runner = phase6.RunnerSpec("modal-forest", "mini-swe-agent-modal-forest", "Modal forest")
+    matrix = phase6.build_run_matrix(
+        output_root=output_root,
+        scope="smoke",
+        mode="patch",
+        audits=["2023-07-pooltogether"],
+        runners=[runner],
+    )
+    phase6.write_matrix(output_root, "smoke", matrix)
+
+    run_dir = output_root / "modal-forest" / "group" / "2023-07-pooltogether_abc"
+    (run_dir / "submission").mkdir(parents=True)
+    (run_dir / "submission" / "agent.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    (run_dir / "run.log").write_text("", encoding="utf-8")
+
+    payload = phase6.summarize_phase6(output_root)
+
+    row = payload["rows"][0]
+    assert row["mode"] == "patch"
+    assert row["submission_exists"] is True
+    assert row["submission_path"].endswith("submission/agent.diff")
 
 
 def test_phase6_slide_data_includes_forest_metadata(tmp_path: Path) -> None:

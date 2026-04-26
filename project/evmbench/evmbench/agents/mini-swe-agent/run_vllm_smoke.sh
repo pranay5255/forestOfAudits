@@ -10,7 +10,9 @@ Usage:
 Environment:
   VLLM_API_BASE      required, e.g. https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1
   VLLM_API_KEY       required, must match the evmbench-vllm-token Modal secret
-  VLLM_DEPLOY_MODE   deploy, run, or skip (default: deploy)
+  VLLM_DEPLOY_MODE   deploy, run, download, or skip (default: deploy)
+  VLLM_MODEL         defaults to Qwen/Qwen3.6-35B-A3B
+  VLLM_SERVED_MODEL_NAME defaults to VLLM_MODEL
   MODEL              defaults to openai/Qwen/Qwen3.6-35B-A3B
   AUDIT_ID           defaults to 2024-01-canto
   OUTPUT_DIR         optional smoke output directory
@@ -36,7 +38,6 @@ if [[ -f .env ]]; then
     set +a
 fi
 
-: "${VLLM_API_BASE:?Set VLLM_API_BASE to the Modal vLLM /v1 URL.}"
 : "${VLLM_API_KEY:?Set VLLM_API_KEY to the vLLM API token.}"
 
 deploy_mode="${VLLM_DEPLOY_MODE:-deploy}"
@@ -47,6 +48,10 @@ case "${deploy_mode}" in
     run)
         uv run modal run evmbench/agents/mini-swe-agent/deploy_vllm.py
         ;;
+    download)
+        uv run modal run evmbench/agents/mini-swe-agent/deploy_vllm.py --download-only
+        exit 0
+        ;;
     skip)
         ;;
     *)
@@ -56,8 +61,12 @@ case "${deploy_mode}" in
         ;;
 esac
 
+: "${VLLM_API_BASE:?Set VLLM_API_BASE to the Modal vLLM /v1 URL.}"
+
 api_root="${VLLM_API_BASE%/}"
 server_root="${api_root%/v1}"
+vllm_model="${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}"
+served_model_name="${VLLM_SERVED_MODEL_NAME:-${vllm_model}}"
 
 curl --fail --silent --show-error \
     --header "Authorization: Bearer ${VLLM_API_KEY}" \
@@ -66,10 +75,10 @@ curl --fail --silent --show-error \
 curl --fail --silent --show-error \
     --header "Authorization: Bearer ${VLLM_API_KEY}" \
     --header "Content-Type: application/json" \
-    --data "{\"model\":\"Qwen/Qwen3.6-35B-A3B\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok\"}],\"max_tokens\":16,\"temperature\":0}" \
+    --data "{\"model\":\"${served_model_name}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok\"}],\"max_tokens\":16,\"temperature\":0}" \
     "${api_root}/chat/completions" >/dev/null
 
-export MODEL="${MODEL:-openai/Qwen/Qwen3.6-35B-A3B}"
+export MODEL="${MODEL:-openai/${served_model_name}}"
 export MSWEA_COST_TRACKING="${MSWEA_COST_TRACKING:-ignore_errors}"
 export OUTPUT_DIR="${OUTPUT_DIR:-runs/vllm-smoke/$(date -u +%Y-%m-%dT%H-%M-%SZ)}"
 

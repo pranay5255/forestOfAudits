@@ -11,10 +11,10 @@ from evmbench.agents.modal_runner import (
 )
 
 
-def _task() -> SimpleNamespace:
+def _task(mode: str = "detect") -> SimpleNamespace:
     return SimpleNamespace(
         audit=SimpleNamespace(id="2024-01-canto", findings_subdir=""),
-        mode="detect",
+        mode=mode,
         hint_level="none",
         docker_image="ghcr.io/pranay5255/evmbench-audit:2024-01-canto",
     )
@@ -120,6 +120,64 @@ def test_modal_forest_invocation_maps_budget_env(tmp_path: Path) -> None:
     assert "2.0" in invocation.command
     assert "--worker-concurrency" in invocation.command
     assert "2" in invocation.command
+
+
+def test_modal_forest_invocation_forwards_patch_mode_and_submission_path(tmp_path: Path) -> None:
+    agent = Agent(
+        id="mini-swe-agent-modal-forest",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_forest",
+        env_vars={"MODEL": "openai/gpt-5"},
+    )
+
+    invocation = build_modal_runner_invocation(
+        agent,
+        _task("patch"),
+        tmp_path / "modal",
+        python_executable="python",
+    )
+
+    assert invocation.runner_name == "forest"
+    assert invocation.command[invocation.command.index("--mode") + 1] == "patch"
+    assert invocation.submission_path == tmp_path / "modal" / "submission" / "agent.diff"
+
+
+def test_modal_forest_invocation_forwards_exploit_mode_and_submission_path(tmp_path: Path) -> None:
+    agent = Agent(
+        id="mini-swe-agent-modal-forest",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_forest",
+        env_vars={"MODEL": "openai/gpt-5"},
+    )
+
+    invocation = build_modal_runner_invocation(
+        agent,
+        _task("exploit"),
+        tmp_path / "modal",
+        python_executable="python",
+    )
+
+    assert invocation.runner_name == "forest"
+    assert invocation.command[invocation.command.index("--mode") + 1] == "exploit"
+    assert invocation.submission_path == tmp_path / "modal" / "submission" / "txs.json"
+
+
+def test_modal_baseline_remains_detect_only(tmp_path: Path) -> None:
+    agent = Agent(
+        id="mini-swe-agent-modal-baseline",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_baseline",
+        env_vars={"MODEL": "openai/gpt-5"},
+    )
+
+    with pytest.raises(RuntimeError, match="detect mode only"):
+        build_modal_runner_invocation(agent, _task("patch"), tmp_path / "modal")
 
 
 def test_modal_invocation_forwards_model_kwargs_json(tmp_path: Path) -> None:

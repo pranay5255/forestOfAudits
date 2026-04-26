@@ -33,11 +33,13 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 from judge import (
     BRANCH_INSTANCE_TEMPLATE,
-    FINAL_SUBMISSION_PATH,
     GLOBAL_JUDGE_INSTANCE_TEMPLATE,
     TREE_JUDGE_INSTANCE_TEMPLATE,
+    branch_artifact_remote_paths,
+    branch_diff_remote_path,
     branch_id,
     branch_inputs_remote_dir,
+    branch_txs_remote_path,
     branch_report_remote_path,
     build_branch_system_template,
     build_branch_task,
@@ -46,7 +48,12 @@ from judge import (
     build_role_file,
     build_tree_judge_system_template,
     build_tree_judge_task,
+    final_submission_path,
+    global_mode_notes,
+    branch_mode_notes,
+    local_branch_diff_path,
     local_branch_report_path,
+    local_branch_txs_path,
     local_tree_judge_path,
     tree_judge_remote_path,
     tree_reports_remote_dir,
@@ -151,6 +158,7 @@ class ForestConfig:
 
 @dataclass(frozen=True)
 class WorkerResult:
+    mode: Mode
     worker_type: str
     worker_name: str
     role: str | None
@@ -161,6 +169,8 @@ class WorkerResult:
     started_at: float
     ended_at: float
     output_path: str | None = None
+    final_artifact_path: str | None = None
+    extracted_artifact_paths: tuple[str, ...] = ()
     audit_scope_files: tuple[str, ...] = ()
 
     @property
@@ -186,6 +196,7 @@ class WorkerSpec:
     cost_limit: float
     trajectory_path: Path
     output_path: str | None = None
+    artifact_paths: tuple[str, ...] = ()
     role: TreeRole | None = None
     branch_index: int | None = None
     template_vars: dict[str, str] = field(default_factory=dict)

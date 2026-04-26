@@ -16,6 +16,12 @@ MODAL_RUNNER_COMMANDS = {
     "modal_forest": "forest",
 }
 
+SUBMISSION_FILENAMES = {
+    "detect": "audit.md",
+    "patch": "agent.diff",
+    "exploit": "txs.json",
+}
+
 
 @dataclass(frozen=True)
 class ModalRunnerInvocation:
@@ -108,7 +114,9 @@ def build_modal_runner_invocation(
 ) -> ModalRunnerInvocation:
     if agent.runner not in MODAL_RUNNER_COMMANDS:
         raise ValueError(f"Agent {agent.id!r} is not a Modal runner: {agent.runner!r}.")
-    if task.mode != "detect":
+    if task.mode not in SUBMISSION_FILENAMES:
+        raise RuntimeError(f"Unsupported EVMBench mode for Modal runner: {task.mode!r}.")
+    if agent.runner == "modal_baseline" and task.mode != "detect":
         raise RuntimeError(
             f"Agent {agent.id!r} uses {agent.runner}, which currently supports detect mode only "
             f"(got {task.mode!r})."
@@ -173,7 +181,7 @@ def build_modal_runner_invocation(
     return ModalRunnerInvocation(
         command=command,
         output_dir=output_dir,
-        submission_path=output_dir / "submission" / "audit.md",
+        submission_path=output_dir / "submission" / SUBMISSION_FILENAMES[task.mode],
         runner_name=runner_name,
     )
 
@@ -303,7 +311,7 @@ def _write_smoke_fallback_submission(agent: Agent, result: ModalRunnerResult) ->
                 "# EVMBench Modal Integration Smoke",
                 "",
                 "This placeholder report was written by the EVMBench Phase 5 adapter.",
-                "The capped Modal runner completed successfully but reached its smoke budget before producing /home/agent/submission/audit.md.",
+                "The capped Modal runner completed successfully but reached its smoke budget before producing the expected submission artifact.",
                 "",
                 f"- Agent: `{agent.id}`",
                 f"- Runner: `{agent.runner}`",

@@ -11,8 +11,10 @@ COMPLETE_COMMAND = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 FOREST_DIR = "/home/agent/forest"
 FINAL_SUBMISSION_PATH = "/home/agent/submission/audit.md"
 
-BRANCH_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md and /home/agent/FOREST_ROLE.md.
-Then inspect /home/agent/audit through the lens of your assigned specialist role.
+BRANCH_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md, /home/agent/FOREST_ROLE.md,
+and /home/agent/AUDIT_SCOPE.md.
+Then inspect only the scoped file(s) present under /home/agent/audit through
+the lens of your assigned specialist role.
 
 Write your branch report to exactly this path:
 
@@ -37,12 +39,13 @@ Task:
 {{ task }}"""
 
 TREE_JUDGE_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md, /home/agent/FOREST_ROLE.md,
-and the branch reports staged under:
+/home/agent/AUDIT_SCOPE.md, and the branch reports staged under:
 
 {{ branch_inputs_dir }}
 
-Inspect /home/agent/audit as needed to resolve contradictions and reject weak
-claims. Write the tree-local merged report to exactly this path:
+Inspect only the scoped file(s) present under /home/agent/audit as needed to
+resolve contradictions and reject weak claims. Write the tree-local merged
+report to exactly this path:
 
 {{ judge_output_path }}
 
@@ -61,13 +64,14 @@ this command and no other command:
 Task:
 {{ task }}"""
 
-GLOBAL_JUDGE_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md and the tree-local judge
-reports staged under:
+GLOBAL_JUDGE_INSTANCE_TEMPLATE = """First read /home/agent/AGENTS.md,
+/home/agent/AUDIT_SCOPE.md, and the tree-local judge reports staged under:
 
 {{ tree_reports_dir }}
 
-Inspect /home/agent/audit as needed to validate the strongest claims. Merge the
-specialist reports into the final EVMBench detect submission and write exactly:
+Inspect only the scoped file(s) present under /home/agent/audit as needed to
+validate the strongest claims. Merge the specialist reports into the final
+EVMBench detect submission and write exactly:
 
 /home/agent/submission/audit.md
 

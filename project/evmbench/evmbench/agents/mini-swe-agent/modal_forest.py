@@ -90,6 +90,7 @@ from evmbench.utils import get_default_runs_dir, get_timestamp
 
 ARCHIVE_BEGIN = "__EVMBENCH_MODAL_FOREST_ARCHIVE_BEGIN__"
 ARCHIVE_END = "__EVMBENCH_MODAL_FOREST_ARCHIVE_END__"
+AUDIT_SCOPE_PATH = f"{AGENT_DIR}/AUDIT_SCOPE.md"
 
 
 def _format_seconds(value: float) -> str:
@@ -160,6 +161,7 @@ class WorkerResult:
     started_at: float
     ended_at: float
     output_path: str | None = None
+    audit_scope_files: tuple[str, ...] = ()
 
     @property
     def runtime_seconds(self) -> float:
@@ -188,6 +190,7 @@ class WorkerSpec:
     branch_index: int | None = None
     template_vars: dict[str, str] = field(default_factory=dict)
     staged_files: dict[str, str] = field(default_factory=dict)
+    audit_scope_files: tuple[str, ...] = ()
     include_submission: bool = False
     forbid_submission: bool = True
 
@@ -199,6 +202,69 @@ def _worker_label(spec: WorkerSpec) -> str:
     if spec.branch_index is not None:
         parts.append(f"branch={branch_id(spec.branch_index)}")
     return " ".join(parts)
+
+
+def _audit_relative_path(remote_path: str) -> str:
+    prefix = f"{AUDIT_DIR}/"
+    if not remote_path.startswith(prefix):
+        raise ValueError(f"Audit target path is outside {AUDIT_DIR}: {remote_path}")
+    rel_path = remote_path[len(prefix):]
+    if rel_path.startswith("/") or rel_path in {"", "."} or ".." in Path(rel_path).parts:
+        raise ValueError(f"Unsafe audit target path: {remote_path}")
+    return rel_path
+
+
+def _audit_scope_files(audit: Audit) -> tuple[str, ...]:
+    files: list[str] = []
+    for vulnerability in audit.vulnerabilities:
+        for remote_path in (vulnerability.patch_path_mapping or {}).values():
+            files.append(_audit_relative_path(remote_path))
+    scoped = tuple(sorted(dict.fromkeys(files)))
+    if not scoped:
+        raise RuntimeError(
+            f"Audit {audit.id} does not define patch_path_mapping entries; "
+            "modal forest cannot build a file-scoped workspace."
+        )
+    return scoped
+
+
+def _branch_scope_files(config: ForestConfig, audit_scope_files: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        scope_file
+        for scope_file in audit_scope_files
+        for _ in range(config.branches_per_tree)
+    )
+
+
+def _scope_file_text(scope_files: Iterable[str]) -> str:
+    files = tuple(scope_files)
+    lines = [
+        "# Audit Scope",
+        "",
+        "The /home/agent/audit directory has been reduced to only these target files:",
+        "",
+    ]
+    lines.extend(f"- {path}" for path in files)
+    lines.extend(
+        [
+            "",
+            "Do not inspect, infer, reconstruct, or search for other audit files.",
+            "All findings and references must come from the scoped file(s) above and staged reports.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _scoped_agent_instructions(instructions: str) -> str:
+    return (
+        instructions.rstrip()
+        + "\n\nForest workspace override:\n"
+        + "For this forest run, /home/agent/audit has been physically reduced to "
+        + "the file(s) listed in /home/agent/AUDIT_SCOPE.md. The original README "
+        + "and other repository files may be absent by design. Do not search for, "
+        + "reconstruct, or infer from files outside that scope.\n"
+    )
 
 
 def _json_ready_config(config: ForestConfig) -> dict[str, Any]:
@@ -245,6 +311,49 @@ def _make_env(config: ForestConfig, image: str, openai_api_key: str) -> Any:
         install_pipx=config.install_pipx,
         modal_sandbox_kwargs=config.modal_sandbox_kwargs,
     )
+
+
+def _restrict_remote_audit_workspace(env: Any, scope_files: tuple[str, ...], label: str) -> None:
+    if not scope_files:
+        raise RuntimeError(f"No audit scope files configured for {label}.")
+    rendered_scope = json.dumps(list(scope_files))
+    command = f"""python3 - <<'PY'
+import json
+import shutil
+from pathlib import Path
+
+root = Path({AUDIT_DIR!r})
+root_resolved = root.resolve()
+scope_files = json.loads({rendered_scope!r})
+tmp = Path("/tmp/evmbench-audit-scope")
+if tmp.exists():
+    shutil.rmtree(tmp)
+tmp.mkdir(parents=True)
+
+for rel in scope_files:
+    rel_path = Path(rel)
+    if rel_path.is_absolute() or ".." in rel_path.parts or str(rel_path) in ("", "."):
+        raise RuntimeError(f"Unsafe audit scope path: {{rel}}")
+    source = (root / rel_path).resolve()
+    if source != root_resolved and root_resolved not in source.parents:
+        raise RuntimeError(f"Audit scope path escapes audit dir: {{rel}}")
+    if not source.is_file():
+        raise RuntimeError(f"Audit scope file does not exist: {{rel}}")
+    dest = tmp / rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, dest)
+
+for child in root.iterdir():
+    if child.is_dir() and not child.is_symlink():
+        shutil.rmtree(child)
+    else:
+        child.unlink()
+
+for child in tmp.iterdir():
+    shutil.move(str(child), str(root / child.name))
+shutil.rmtree(tmp)
+PY"""
+    _run_remote(env, command, f"restrict audit workspace for {label}", timeout=120)
 
 
 def _extract_worker_outputs(
@@ -324,12 +433,14 @@ def _run_worker(
     try:
         _log(f"worker prepare remote workspace {label}")
         _prepare_remote_workspace(env)
-        _stage_rendered_instructions(env, instructions)
+        _stage_rendered_instructions(env, _scoped_agent_instructions(instructions))
         for remote_path, text in spec.staged_files.items():
             _log(f"worker stage file {label} remote_path={remote_path} bytes={len(text.encode('utf-8'))}")
             _remote_write_text(env, remote_path, text, f"stage {remote_path}")
 
         ploit_toml = _prepare_mode(env, audit, config.mode)
+        _log(f"worker restrict audit scope {label} files={','.join(spec.audit_scope_files)}")
+        _restrict_remote_audit_workspace(env, spec.audit_scope_files, label)
         _log(f"worker run agent {label}")
         model = LitellmModel(
             model_name=spec.model_name,
@@ -376,6 +487,7 @@ def _run_worker(
         started_at=started_at,
         ended_at=ended_at,
         output_path=spec.output_path,
+        audit_scope_files=spec.audit_scope_files,
     )
 
 
@@ -385,9 +497,13 @@ def _read_local_text(path: Path, *, missing_text: str) -> str:
     return missing_text
 
 
-def _stage_branch_reports(config: ForestConfig, role: TreeRole) -> dict[str, str]:
+def _stage_branch_reports(
+    config: ForestConfig,
+    role: TreeRole,
+    audit_scope_files: tuple[str, ...],
+) -> dict[str, str]:
     staged: dict[str, str] = {}
-    for index in range(1, config.branches_per_tree + 1):
+    for index in range(1, len(_branch_scope_files(config, audit_scope_files)) + 1):
         local_path = local_branch_report_path(config.output_dir, role, index)
         report = _read_local_text(
             local_path,
@@ -412,10 +528,16 @@ def _stage_tree_reports(output_dir: Path, roles: Iterable[TreeRole]) -> dict[str
     return staged
 
 
-def _worker_specs_for_branches(config: ForestConfig, roles: Iterable[TreeRole]) -> list[WorkerSpec]:
+def _worker_specs_for_branches(
+    config: ForestConfig,
+    roles: Iterable[TreeRole],
+    audit_scope_files: tuple[str, ...],
+) -> list[WorkerSpec]:
     specs: list[WorkerSpec] = []
+    branch_scopes = _branch_scope_files(config, audit_scope_files)
+    branch_count = len(branch_scopes)
     for role in roles:
-        for index in range(1, config.branches_per_tree + 1):
+        for index, scope_file in enumerate(branch_scopes, start=1):
             branch = branch_id(index)
             output_path = branch_report_remote_path(role, index)
             specs.append(
@@ -424,15 +546,19 @@ def _worker_specs_for_branches(config: ForestConfig, roles: Iterable[TreeRole]) 
                     worker_name=f"{role.name}-{branch}",
                     role=role,
                     branch_index=index,
-                    system_template=build_branch_system_template(role, index, config.branches_per_tree),
+                    system_template=build_branch_system_template(role, index, branch_count),
                     instance_template=BRANCH_INSTANCE_TEMPLATE,
-                    task=build_branch_task(role, index, config.branches_per_tree, config.task),
+                    task=build_branch_task(role, index, branch_count, config.task),
                     model_name=config.branch_model,
                     step_limit=config.branch_step_limit,
                     cost_limit=config.branch_cost_limit,
                     trajectory_path=config.output_dir / "logs" / "forest" / role.name / f"{branch}.traj.json",
                     output_path=output_path,
-                    staged_files={f"{AGENT_DIR}/FOREST_ROLE.md": build_role_file(role)},
+                    staged_files={
+                        f"{AGENT_DIR}/FOREST_ROLE.md": build_role_file(role),
+                        AUDIT_SCOPE_PATH: _scope_file_text((scope_file,)),
+                    },
+                    audit_scope_files=(scope_file,),
                     template_vars={
                         "branch_output_path": output_path,
                     },
@@ -441,7 +567,11 @@ def _worker_specs_for_branches(config: ForestConfig, roles: Iterable[TreeRole]) 
     return specs
 
 
-def _worker_specs_for_tree_judges(config: ForestConfig, roles: Iterable[TreeRole]) -> list[WorkerSpec]:
+def _worker_specs_for_tree_judges(
+    config: ForestConfig,
+    roles: Iterable[TreeRole],
+    audit_scope_files: tuple[str, ...],
+) -> list[WorkerSpec]:
     specs: list[WorkerSpec] = []
     for role in roles:
         output_path = tree_judge_remote_path(role)
@@ -460,8 +590,10 @@ def _worker_specs_for_tree_judges(config: ForestConfig, roles: Iterable[TreeRole
                 output_path=output_path,
                 staged_files={
                     f"{AGENT_DIR}/FOREST_ROLE.md": build_role_file(role),
-                    **_stage_branch_reports(config, role),
+                    AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files),
+                    **_stage_branch_reports(config, role, audit_scope_files),
                 },
+                audit_scope_files=audit_scope_files,
                 template_vars={
                     "branch_inputs_dir": branch_inputs_remote_dir(role),
                     "judge_output_path": output_path,
@@ -471,7 +603,7 @@ def _worker_specs_for_tree_judges(config: ForestConfig, roles: Iterable[TreeRole
     return specs
 
 
-def _scout_spec(config: ForestConfig) -> WorkerSpec:
+def _scout_spec(config: ForestConfig, audit_scope_files: tuple[str, ...]) -> WorkerSpec:
     return WorkerSpec(
         worker_type="scout",
         worker_name="scout",
@@ -483,13 +615,19 @@ def _scout_spec(config: ForestConfig) -> WorkerSpec:
         cost_limit=config.scout_cost_limit,
         trajectory_path=config.output_dir / "logs" / "forest" / "scout.traj.json",
         output_path=f"{AGENT_DIR}/forest/scout/scout.md",
+        staged_files={AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files)},
+        audit_scope_files=audit_scope_files,
         template_vars={
             "role_catalog": render_role_catalog(DEFAULT_TREE_ROLE_NAMES),
         },
     )
 
 
-def _global_judge_spec(config: ForestConfig, roles: Iterable[TreeRole]) -> WorkerSpec:
+def _global_judge_spec(
+    config: ForestConfig,
+    roles: Iterable[TreeRole],
+    audit_scope_files: tuple[str, ...],
+) -> WorkerSpec:
     return WorkerSpec(
         worker_type="global_judge",
         worker_name="global-judge",
@@ -501,7 +639,11 @@ def _global_judge_spec(config: ForestConfig, roles: Iterable[TreeRole]) -> Worke
         cost_limit=config.global_cost_limit,
         trajectory_path=config.output_dir / "logs" / "forest" / "global-judge.traj.json",
         output_path=FINAL_SUBMISSION_PATH,
-        staged_files=_stage_tree_reports(config.output_dir, roles),
+        staged_files={
+            AUDIT_SCOPE_PATH: _scope_file_text(audit_scope_files),
+            **_stage_tree_reports(config.output_dir, roles),
+        },
+        audit_scope_files=audit_scope_files,
         template_vars={
             "tree_reports_dir": tree_reports_remote_dir(),
         },
@@ -627,6 +769,12 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     )
 
     audit, instructions = _load_audit_for_mode(cast(Any, config))
+    audit_scope_files = _audit_scope_files(audit)
+    _log(
+        "audit scope files: "
+        + ", ".join(audit_scope_files)
+        + f" (branch_workers_per_tree={len(_branch_scope_files(config, audit_scope_files))})"
+    )
     started_at = time.time()
     worker_results: list[WorkerResult] = []
     scout_decision: ScoutDecision | None = None
@@ -640,7 +788,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             config,
             audit,
             instructions,
-            _scout_spec(config),
+            _scout_spec(config, audit_scope_files),
             openai_api_key=openai_api_key,
         )
         worker_results.append(scout_result)
@@ -661,7 +809,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             config,
             audit,
             instructions,
-            _worker_specs_for_branches(config, selected_roles),
+            _worker_specs_for_branches(config, selected_roles, audit_scope_files),
             openai_api_key=openai_api_key,
         )
         worker_results.extend(branch_results)
@@ -676,7 +824,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             config,
             audit,
             instructions,
-            _worker_specs_for_tree_judges(config, selected_roles),
+            _worker_specs_for_tree_judges(config, selected_roles, audit_scope_files),
             openai_api_key=openai_api_key,
         )
         worker_results.extend(tree_judge_results)
@@ -691,7 +839,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             config,
             audit,
             instructions,
-            _global_judge_spec(config, selected_roles),
+            _global_judge_spec(config, selected_roles, audit_scope_files),
             openai_api_key=openai_api_key,
         )
         worker_results.append(global_result)
@@ -708,6 +856,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         return {
             "output_dir": str(config.output_dir),
             "selected_roles": [role.name for role in selected_roles],
+            "audit_scope_files": list(audit_scope_files),
             "workers": [worker.to_dict() for worker in worker_results],
         }
     except Exception as exc:

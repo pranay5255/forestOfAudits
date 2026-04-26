@@ -419,6 +419,80 @@ modal setup
 modal secret create openai-api-key OPENAI_API_KEY="$OPENAI_API_KEY"
 ```
 
+### Self-host Qwen vLLM on Modal
+
+`evmbench/agents/mini-swe-agent/deploy_vllm.py` deploys an OpenAI-compatible
+vLLM server for `Qwen/Qwen3.6-35B-A3B`. The default deployment uses
+2x A100-80GB, tensor parallelism, BF16 weights, a 32K context window, Qwen
+reasoning parsing, prefix caching, MTP speculative decoding, and
+`--language-model-only` to skip the vision encoder.
+
+Create the Modal secret used by the vLLM endpoint:
+
+```bash
+export VLLM_API_KEY="$(openssl rand -hex 32)"
+export HF_TOKEN="$(hf auth token)"  # or paste a Hugging Face read token
+modal secret create evmbench-vllm-token \
+  VLLM_API_KEY="$VLLM_API_KEY" \
+  HF_TOKEN="$HF_TOKEN"
+```
+
+Optionally pre-download the model into the Modal Hugging Face cache volume:
+
+```bash
+uv run modal run evmbench/agents/mini-swe-agent/deploy_vllm.py --download-only
+```
+
+Deploy the endpoint:
+
+```bash
+uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+```
+
+After Modal prints the web URL, point EVMBench/LiteLLM at the `/v1` route:
+
+```bash
+export VLLM_API_BASE="https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1"
+export MODEL="openai/Qwen/Qwen3.6-35B-A3B"
+export MSWEA_COST_TRACKING=ignore_errors
+```
+
+Run the vLLM smoke:
+
+```bash
+evmbench/agents/mini-swe-agent/run_vllm_smoke.sh
+```
+
+Use the registered vLLM agents in EVMBench:
+
+```bash
+uv run python -m evmbench.nano.entrypoint \
+  evmbench.audit=2024-01-canto \
+  evmbench.mode=detect \
+  evmbench.hint_level=none \
+  evmbench.log_to_run_dir=True \
+  evmbench.solver=evmbench.nano.solver.EVMbenchSolver \
+  evmbench.solver.agent_id=mini-swe-agent-modal-forest-qwen-vllm \
+  runner.concurrency=1
+```
+
+Useful deployment overrides:
+
+```bash
+# More context on more GPUs.
+VLLM_MODAL_GPU=H100:4 \
+VLLM_TENSOR_PARALLEL_SIZE=4 \
+VLLM_MAX_MODEL_LEN=131072 \
+uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+
+# Lower cost/faster cold starts if the FP8 model is acceptable.
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B-FP8 \
+VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
+VLLM_MODAL_GPU=H100:1 \
+VLLM_TENSOR_PARALLEL_SIZE=1 \
+uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+```
+
 The Phase 6 shell wrappers load `.env` automatically when it exists.
 
 ## Run EVMBench
@@ -488,6 +562,9 @@ Python harness.
 | --- | --- |
 | `presentation` | `codex-default`, `modal-baseline`, `modal-forest` |
 | `smoke` | `codex-default`, `mini-smoke-10`, `modal-baseline-smoke-10`, `modal-forest-smoke` |
+| `modal-debug` | Modal smoke runners plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
+| `forest-debug` | `modal-forest-smoke` plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
+| `vllm` | Qwen vLLM Modal baseline and forest variants |
 | `modal` | `modal-baseline`, `modal-forest` |
 | `local` | local `mini-swe-agent` variants |
 | `all` | every registered Phase 6 variant |
@@ -526,6 +603,17 @@ Run only the Modal forest:
 
 ```bash
 evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope first5 --runners modal-forest --stop-on-failure
+```
+
+For debugging, prefer a single audit and a per-item timeout before running a
+wide matrix:
+
+```bash
+PHASE6_ITEM_TIMEOUT_SECONDS=7200 \
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
+  --audits 2024-01-canto \
+  --runners modal-forest-gpt52-codex-2trees-debug \
+  --stop-on-failure
 ```
 
 Summarize an existing run:

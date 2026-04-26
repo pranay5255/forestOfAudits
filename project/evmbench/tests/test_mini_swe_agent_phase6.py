@@ -44,6 +44,26 @@ def test_phase6_non_smoke_modal_variants_are_registered_without_fallback() -> No
     assert "MODAL_TASK" not in forest.env_vars
 
 
+def test_qwen_vllm_modal_variants_are_registered() -> None:
+    baseline = agent_registry.get_agent("mini-swe-agent-modal-baseline-qwen-vllm")
+    forest = agent_registry.get_agent("mini-swe-agent-modal-forest-qwen-vllm")
+
+    assert baseline.runner == "modal_baseline"
+    assert baseline.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert baseline.env_vars["MODAL_OPENAI_SECRET_NAME"] == ""
+    assert baseline.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+    assert forest.runner == "modal_forest"
+    assert forest.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["SCOUT_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["BRANCH_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["JUDGE_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["GLOBAL_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["TREE_ROLES"] == "token-flow,accounting,access-control,cross-contract"
+    assert forest.env_vars["FOREST_WORKER_CONCURRENCY"] == "4"
+    assert forest.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+
 def test_phase6_gpt52_codex_8tree_modal_forest_variant_is_registered() -> None:
     forest = agent_registry.get_agent("mini-swe-agent-modal-forest-gpt-5.2-codex-8trees")
 
@@ -58,6 +78,31 @@ def test_phase6_gpt52_codex_8tree_modal_forest_variant_is_registered() -> None:
     assert len(forest.env_vars["TREE_ROLES"].split(",")) == 8
     assert forest.env_vars["FOREST_WORKER_CONCURRENCY"] == "8"
     assert forest.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+
+def test_phase6_gpt52_codex_debug_modal_forest_variants_are_registered() -> None:
+    two_tree = agent_registry.get_agent(
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug"
+    )
+    four_tree = agent_registry.get_agent(
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-4trees-debug"
+    )
+
+    assert two_tree.runner == "modal_forest"
+    assert two_tree.env_vars["MODEL"] == "openai/gpt-5.2-codex"
+    assert two_tree.env_vars["MAX_TREE_ROLES"] == "2"
+    assert two_tree.env_vars["TREE_ROLES"] == "token-flow,accounting"
+    assert two_tree.env_vars["FOREST_WORKER_CONCURRENCY"] == "2"
+    assert two_tree.env_vars["FOREST_CONTINUE_ON_WORKER_ERROR"] == "1"
+
+    assert four_tree.runner == "modal_forest"
+    assert four_tree.env_vars["MAX_TREE_ROLES"] == "4"
+    assert (
+        four_tree.env_vars["TREE_ROLES"]
+        == "token-flow,accounting,access-control,cross-contract"
+    )
+    assert four_tree.env_vars["FOREST_WORKER_CONCURRENCY"] == "2"
+    assert four_tree.env_vars["FOREST_CONTINUE_ON_WORKER_ERROR"] == "1"
 
 
 def test_phase6_plan_emits_default_runner_matrix(tmp_path: Path, capsys) -> None:
@@ -96,7 +141,23 @@ def test_phase6_runner_groups_cover_presentation_smoke_and_all_variants() -> Non
         "mini-swe-agent-modal-baseline-smoke-10",
         "mini-swe-agent-modal-forest",
         "mini-swe-agent-modal-forest-smoke",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-4trees-debug",
+        "mini-swe-agent-modal-baseline-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm",
     }.issubset(all_variants)
+
+    forest_debug = {runner.agent_id for runner in phase6.parse_runner_list("forest-debug")}
+    assert forest_debug == {
+        "mini-swe-agent-modal-forest-smoke",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-4trees-debug",
+    }
+    vllm = {runner.agent_id for runner in phase6.parse_runner_list("vllm")}
+    assert vllm == {
+        "mini-swe-agent-modal-baseline-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm",
+    }
 
 
 def test_phase6_variants_command_lists_runnable_agent_ids(capsys) -> None:
@@ -107,7 +168,15 @@ def test_phase6_variants_command_lists_runnable_agent_ids(capsys) -> None:
     assert "presentation:" in output
     assert "mini-default\tmini-swe-agent-default" in output
     assert "modal-forest-smoke\tmini-swe-agent-modal-forest-smoke" in output
-    assert "modal-forest-gpt52-codex-8trees\tmini-swe-agent-modal-forest-gpt-5.2-codex-8trees" in output
+    assert (
+        "modal-forest-gpt52-codex-8trees"
+        "\tmini-swe-agent-modal-forest-gpt-5.2-codex-8trees"
+    ) in output
+    assert (
+        "modal-forest-gpt52-codex-2trees-debug"
+        "\tmini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug"
+    ) in output
+    assert "modal-forest-qwen-vllm\tmini-swe-agent-modal-forest-qwen-vllm" in output
 
 
 def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: Path) -> None:
@@ -265,3 +334,31 @@ def test_phase6_summary_records_command_failure_without_run_dir(tmp_path: Path) 
     row = payload["rows"][0]
     assert row["submission_exists"] is False
     assert row["failure_reason"] == "command exited 2"
+
+
+def test_phase6_summary_records_command_timeout_without_run_dir(tmp_path: Path) -> None:
+    output_root = tmp_path / "phase6"
+    runner = phase6.RunnerSpec(
+        "modal-forest-debug",
+        "mini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug",
+        "Forest",
+    )
+    matrix = phase6.build_run_matrix(
+        output_root=output_root,
+        scope="smoke",
+        audits=["2024-01-canto"],
+        runners=[runner],
+    )
+    phase6.write_matrix(output_root, "smoke", matrix)
+    status_path = phase6.command_status_path(output_root, matrix[0])
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps({"returncode": 124, "timed_out": True, "timeout_seconds": 3600}),
+        encoding="utf-8",
+    )
+
+    payload = phase6.summarize_phase6(output_root)
+
+    row = payload["rows"][0]
+    assert row["submission_exists"] is False
+    assert row["failure_reason"] == "command timed out after 1h00m00.0s"

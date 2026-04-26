@@ -13,6 +13,9 @@ Usage:
 Runner groups:
   presentation  codex-default, modal-baseline, modal-forest
   smoke         codex-default, mini-smoke-10, modal-baseline-smoke-10, modal-forest-smoke
+  modal-debug   modal smoke runners plus GPT-5.2 Codex 2-tree and 4-tree forest debug
+  forest-debug  modal-forest-smoke plus GPT-5.2 Codex 2-tree and 4-tree forest debug
+  vllm          Qwen vLLM modal baseline and forest variants
   local         mini-default, mini-smoke-10, mini-gpt-5-mini
   modal         modal-baseline, modal-forest
   all           every registered variant
@@ -20,6 +23,7 @@ Runner groups:
 Environment:
   .env is loaded when present.
   MODAL_AUDIT_IMAGE_REPO defaults to ghcr.io/pranay5255/evmbench-audit.
+  PHASE6_ITEM_TIMEOUT_SECONDS can cap each matrix item during run.
 EOF
 }
 

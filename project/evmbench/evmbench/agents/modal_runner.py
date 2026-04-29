@@ -194,6 +194,18 @@ def modal_runner_environment(agent: Agent) -> dict[str, str]:
 
     openai_api_key = _usable_api_key(env.get("OPENAI_API_KEY"))
     vllm_api_key = _usable_api_key(env.get("VLLM_API_KEY"))
+    vllm_api_base = _usable_api_key(env.get("VLLM_API_BASE"))
+    if vllm_api_base:
+        if not vllm_api_key:
+            raise RuntimeError(
+                f"Agent {agent.id!r} sets VLLM_API_BASE for a self-hosted vLLM endpoint, "
+                "but VLLM_API_KEY is not set on the host."
+            )
+        env["OPENAI_API_KEY"] = vllm_api_key
+        env["OPENAI_API_BASE"] = vllm_api_base
+        env["OPENAI_BASE_URL"] = vllm_api_base
+        return env
+
     model_api_key = openai_api_key or vllm_api_key
     if not model_api_key:
         raise RuntimeError(

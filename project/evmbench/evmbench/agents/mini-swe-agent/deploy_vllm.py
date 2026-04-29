@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Modal deployment for an OpenAI-compatible vLLM endpoint.
 
-The default app serves Qwen/Qwen3.6-35B-A3B on 2x A100-80GB GPUs. EVMBench
+The default app uses a single H100 with the FP8 Qwen checkpoint. EVMBench
 workers call this endpoint through LiteLLM by setting VLLM_API_BASE and
 VLLM_API_KEY in the host process.
 """
@@ -22,18 +22,11 @@ APP_NAME = "evmbench-vllm-qwen"
 WEB_LABEL = f"{APP_NAME}-serve"
 DEFAULT_API_KEY_ENV = "VLLM_API_KEY"
 DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
+DEFAULT_H100_MODEL = f"{DEFAULT_MODEL}-FP8"
+DEFAULT_GPU_CONFIG = "H100:1"
 HF_CACHE_PATH = "/root/.cache/huggingface"
 VLLM_CACHE_PATH = "/root/.cache/vllm"
 PORT = 8000
-
-MODEL_NAME = os.getenv("VLLM_MODEL", DEFAULT_MODEL)
-SERVED_MODEL_NAME = os.getenv("VLLM_SERVED_MODEL_NAME", MODEL_NAME)
-GPU_CONFIG = os.getenv("VLLM_MODAL_GPU", "A100-80GB:2")
-MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "32768"))
-MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "16"))
-GPU_MEMORY_UTILIZATION = os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.90")
-DTYPE = os.getenv("VLLM_DTYPE", "bfloat16")
-NUM_SPECULATIVE_TOKENS = int(os.getenv("VLLM_NUM_SPECULATIVE_TOKENS", "2"))
 
 
 def _gpu_count(gpu_config: str) -> int:
@@ -43,6 +36,10 @@ def _gpu_count(gpu_config: str) -> int:
     return int(count)
 
 
+def _gpu_family(gpu_config: str) -> str:
+    return gpu_config.split(":", 1)[0].upper()
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -50,9 +47,51 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-TENSOR_PARALLEL_SIZE = int(os.getenv("VLLM_TENSOR_PARALLEL_SIZE", str(_gpu_count(GPU_CONFIG))))
+def _is_expensive_gpu(gpu_config: str) -> bool:
+    family = _gpu_family(gpu_config)
+    return family in {"B200", "H200"} or _gpu_count(gpu_config) > 1
+
+
+def _require_expensive_gpu_opt_in(gpu_config: str) -> None:
+    if _is_expensive_gpu(gpu_config) and not _env_bool("VLLM_ALLOW_EXPENSIVE_GPU", False):
+        raise RuntimeError(
+            f"Refusing to configure expensive Modal GPU {gpu_config!r}. "
+            "Set VLLM_ALLOW_EXPENSIVE_GPU=1 to deploy B200/H200 or multi-GPU vLLM servers."
+        )
+
+
+GPU_CONFIG = os.getenv("VLLM_MODAL_GPU", DEFAULT_GPU_CONFIG)
+GPU_FAMILY = _gpu_family(GPU_CONFIG)
+GPU_COUNT = _gpu_count(GPU_CONFIG)
+SINGLE_H100_PROFILE = GPU_FAMILY == "H100" and GPU_COUNT == 1
+MODEL_NAME = os.getenv("VLLM_MODEL") or (DEFAULT_H100_MODEL if SINGLE_H100_PROFILE else DEFAULT_MODEL)
+SERVED_MODEL_NAME = os.getenv("VLLM_SERVED_MODEL_NAME", MODEL_NAME)
+MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "32768"))
+MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "8" if SINGLE_H100_PROFILE else "16"))
+GPU_MEMORY_UTILIZATION = os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.90")
+DTYPE = os.getenv("VLLM_DTYPE", "auto" if SINGLE_H100_PROFILE else "bfloat16")
+NUM_SPECULATIVE_TOKENS = int(os.getenv("VLLM_NUM_SPECULATIVE_TOKENS", "2"))
+STARTUP_TIMEOUT_SECONDS = int(os.getenv("VLLM_STARTUP_TIMEOUT_SECONDS", "600"))
+SCALEDOWN_WINDOW_SECONDS = int(os.getenv("VLLM_SCALEDOWN_WINDOW_SECONDS", "60"))
+
+_require_expensive_gpu_opt_in(GPU_CONFIG)
+
+
+TENSOR_PARALLEL_SIZE = int(os.getenv("VLLM_TENSOR_PARALLEL_SIZE", str(GPU_COUNT)))
 ENABLE_MTP = _env_bool("VLLM_ENABLE_MTP", True)
 FAST_BOOT = _env_bool("VLLM_FAST_BOOT", False)
+
+
+def _config_summary() -> str:
+    return (
+        f"model={MODEL_NAME} served_model={SERVED_MODEL_NAME} gpu={GPU_CONFIG} "
+        f"tensor_parallel={TENSOR_PARALLEL_SIZE} max_model_len={MAX_MODEL_LEN} "
+        f"max_num_seqs={MAX_NUM_SEQS} dtype={DTYPE} "
+        f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION} mtp={ENABLE_MTP} "
+        f"num_speculative_tokens={NUM_SPECULATIVE_TOKENS if ENABLE_MTP else 0} "
+        f"fast_boot={FAST_BOOT} startup_timeout={STARTUP_TIMEOUT_SECONDS} "
+        f"scaledown_window={SCALEDOWN_WINDOW_SECONDS}"
+    )
 
 app = modal.App(APP_NAME)
 
@@ -86,6 +125,7 @@ def download_model(model_name: str = MODEL_NAME) -> str:
     """Populate the Modal Hugging Face cache without using local disk."""
     from huggingface_hub import snapshot_download
 
+    print(f"Downloading model into Modal HF cache: {model_name}", flush=True)
     path = snapshot_download(model_name, cache_dir=HF_CACHE_PATH)
     hf_cache.commit()
     return path
@@ -100,13 +140,14 @@ def download_model(model_name: str = MODEL_NAME) -> str:
         VLLM_CACHE_PATH: vllm_cache,
     },
     timeout=60 * 60 * 24,
-    startup_timeout=60 * 30,
-    scaledown_window=300,
+    startup_timeout=STARTUP_TIMEOUT_SECONDS,
+    scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 )
 @modal.concurrent(max_inputs=50)
-@modal.web_server(port=PORT, startup_timeout=60 * 30, label=WEB_LABEL)
+@modal.web_server(port=PORT, startup_timeout=STARTUP_TIMEOUT_SECONDS, label=WEB_LABEL)
 def serve() -> None:
     api_key = os.environ[DEFAULT_API_KEY_ENV]
+    print(f"vLLM Modal config: {_config_summary()}", flush=True)
     command = [
         "vllm",
         "serve",
@@ -131,9 +172,10 @@ def serve() -> None:
         str(MAX_NUM_SEQS),
         "--reasoning-parser",
         "qwen3",
+        "--default-chat-template-kwargs",
+        json.dumps({"enable_thinking": False}),
         "--language-model-only",
         "--enable-prefix-caching",
-        "--disable-log-requests",
         "--uvicorn-log-level",
         "warning",
     ]
@@ -153,7 +195,11 @@ def serve() -> None:
         command.append("--enforce-eager")
     redacted = ["<redacted>" if part == api_key else part for part in command]
     print(f"Starting vLLM: {shlex.join(redacted)}", flush=True)
-    subprocess.Popen(command)
+    process = subprocess.Popen(command)
+    time.sleep(5)
+    return_code = process.poll()
+    if return_code is not None:
+        raise RuntimeError(f"vLLM exited before the web server became ready with code {return_code}.")
 
 
 def _request(
@@ -193,6 +239,7 @@ def _wait_for_health(base_url: str, *, api_key: str, timeout_seconds: int = 900)
 
 @app.local_entrypoint()
 def main(prompt: str = "Reply with the single word: ok", download_only: bool = False) -> None:
+    print(f"vLLM Modal config: {_config_summary()}", flush=True)
     if download_only:
         path = download_model.remote(MODEL_NAME)
         print(f"Downloaded {MODEL_NAME} into Modal volume cache: {path}", flush=True)

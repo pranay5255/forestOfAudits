@@ -1,3 +1,6 @@
+import os
+import subprocess
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +12,7 @@ from evmbench.agents.modal_runner import (
     modal_runner_environment,
     run_modal_runner,
 )
+from evmbench.nano.solver import _container_gateway_sni_hosts
 
 
 def _task(mode: str = "detect") -> SimpleNamespace:
@@ -39,6 +43,248 @@ def test_registry_loads_modal_runner_variants() -> None:
     assert forest.runner == "modal_forest"
     assert forest.env_vars["BRANCHES_PER_TREE"] == "1"
     assert forest.env_vars["FOREST_WORKER_CONCURRENCY"] == "2"
+
+
+def test_registry_loads_container_vllm_variant(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_SERVED_MODEL_NAME", "Qwen/Qwen3.6-35B-A3B-FP8")
+    monkeypatch.setenv("VLLM_LITELLM_MODEL", "openai/Qwen/Qwen3.6-35B-A3B-FP8")
+
+    agent = agent_registry.get_agent("mini-swe-agent-qwen-vllm-smoke-10")
+
+    assert agent.runner == "container"
+    assert agent.env_vars["VLLM_API_BASE"] == "https://vllm.example.test/v1"
+    assert agent.env_vars["VLLM_API_KEY"] == "vllm-key"
+    assert agent.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B-FP8"
+    assert agent.env_vars["STEP_LIMIT"] == "10"
+    assert agent.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+
+def test_registry_loads_opencode_vllm_variant(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_SERVED_MODEL_NAME", "Qwen/Qwen3.6-35B-A3B-FP8")
+    monkeypatch.setenv("VLLM_LITELLM_MODEL", "openai/Qwen/Qwen3.6-35B-A3B-FP8")
+
+    agent = agent_registry.get_agent("opencode-qwen-vllm")
+
+    assert agent.runner == "container"
+    assert agent.env_vars["VLLM_API_BASE"] == "https://vllm.example.test/v1"
+    assert agent.env_vars["VLLM_API_KEY"] == "vllm-key"
+    assert agent.env_vars["VLLM_SERVED_MODEL_NAME"] == "Qwen/Qwen3.6-35B-A3B-FP8"
+    assert agent.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B-FP8"
+    assert agent.env_vars["OPENCODE_PROVIDER_ID"] == "vllm"
+
+
+def test_registry_loads_modal_opencode_vllm_variants(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_SERVED_MODEL_NAME", "Qwen/Qwen3.6-35B-A3B-FP8")
+    monkeypatch.setenv("VLLM_LITELLM_MODEL", "openai/Qwen/Qwen3.6-35B-A3B-FP8")
+
+    agent = agent_registry.get_agent("opencode-modal-qwen-vllm")
+    dry_run = agent_registry.get_agent("opencode-modal-qwen-vllm-dry-run")
+    bounded = agent_registry.get_agent("opencode-modal-qwen-vllm-10min")
+
+    assert agent.runner == "modal_opencode"
+    assert agent.env_vars["VLLM_API_BASE"] == "https://vllm.example.test/v1"
+    assert agent.env_vars["VLLM_API_KEY"] == "vllm-key"
+    assert agent.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B-FP8"
+    assert agent.env_vars["MODAL_OPENAI_SECRET_NAME"] == ""
+    assert agent.env_vars["MODAL_GRADE"] == "0"
+    assert agent.env_vars["MODAL_COMMAND_TIMEOUT"] == "10800"
+
+    assert dry_run.runner == "modal_opencode"
+    assert dry_run.env_vars["OPENCODE_DRY_RUN"] == "1"
+    assert dry_run.env_vars["MODAL_COMMAND_TIMEOUT"] == "300"
+
+    assert bounded.runner == "modal_opencode"
+    assert bounded.env_vars["OPENCODE_AGENT_TIMEOUT_SECONDS"] == "540"
+    assert bounded.env_vars["MODAL_COMMAND_TIMEOUT"] == "660"
+
+
+def test_container_gateway_sni_hosts_include_vllm_api_base() -> None:
+    agent = Agent(
+        id="mini-swe-agent-qwen-vllm-smoke-10",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="container",
+        env_vars={},
+        gateway_sni_hosts=["api.openai.com"],
+    )
+
+    hosts = _container_gateway_sni_hosts(
+        agent,
+        {"VLLM_API_BASE": "https://workspace--evmbench-vllm-qwen-serve.modal.run/v1"},
+    )
+
+    assert hosts == [
+        "api.openai.com",
+        "workspace--evmbench-vllm-qwen-serve.modal.run",
+    ]
+
+
+def test_start_sh_writes_vllm_litellm_config(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_mini = fake_bin / "mini"
+    fake_mini.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = \"--help\" ]; then exit 0; fi\n"
+        "printf 'fake mini\\n'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_mini.chmod(0o755)
+
+    workspace = tmp_path / "workspace"
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "WORKSPACE_BASE": str(workspace),
+            "VLLM_API_BASE": "https://vllm.example.test/v1",
+            "VLLM_API_KEY": "vllm-key",
+            "VLLM_SERVED_MODEL_NAME": "Qwen/Qwen3.6-35B-A3B-FP8",
+        }
+    )
+    for name in ("MODEL", "OPENAI_API_BASE", "OPENAI_BASE_URL", "MODEL_KWARGS_JSON"):
+        env.pop(name, None)
+
+    start_sh = Path(agent_registry.get_agent("mini-swe-agent-default").start_sh)
+    completed = subprocess.run(
+        ["bash", str(start_sh)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    mini_config = workspace / "agent" / "mini-override.yaml"
+    assert mini_config.exists()
+    rendered = mini_config.read_text(encoding="utf-8")
+    assert 'model_name: "openai/Qwen/Qwen3.6-35B-A3B-FP8"' in rendered
+    assert 'api_base: "https://vllm.example.test/v1"' in rendered
+    assert "drop_params: true" in rendered
+
+
+def test_opencode_start_sh_writes_vllm_openai_compatible_config(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > \"$LOGS_DIR/opencode-args.txt\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+
+    workspace = tmp_path / "workspace"
+    agent_dir = workspace / "agent"
+    audit_dir = agent_dir / "audit"
+    logs_dir = workspace / "logs"
+    audit_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "WORKSPACE_BASE": str(workspace),
+            "AGENT_DIR": str(agent_dir),
+            "AUDIT_DIR": str(audit_dir),
+            "LOGS_DIR": str(logs_dir),
+            "VLLM_API_BASE": "https://vllm.example.test/v1",
+            "VLLM_API_KEY": "vllm-key",
+            "VLLM_SERVED_MODEL_NAME": "Qwen/Qwen3.6-35B-A3B-FP8",
+            "MODEL": "openai/Qwen/Qwen3.6-35B-A3B-FP8",
+        }
+    )
+    env.pop("OPENROUTER_API_KEY", None)
+
+    start_sh = Path(agent_registry.get_agent("opencode-default").start_sh)
+    completed = subprocess.run(
+        ["bash", str(start_sh)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    config = json.loads((agent_dir / "opencode.json").read_text(encoding="utf-8"))
+    provider = config["provider"]["vllm"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "{env:VLLM_API_BASE}"
+    assert provider["options"]["apiKey"] == "{env:VLLM_API_KEY}"
+    assert "Qwen/Qwen3.6-35B-A3B-FP8" in provider["models"]
+    args = (logs_dir / "opencode-args.txt").read_text(encoding="utf-8")
+    assert "--model\nvllm/Qwen/Qwen3.6-35B-A3B-FP8\n" in args
+    trajectory = json.loads((logs_dir / "opencode" / "opencode.traj.json").read_text(encoding="utf-8"))
+    assert trajectory["trajectory_format"] == "opencode-run-jsonl-v1"
+    assert trajectory["model"] == "vllm/Qwen/Qwen3.6-35B-A3B-FP8"
+    assert trajectory["exit_code"] == 0
+
+
+def test_opencode_start_sh_dry_run_validates_config_and_writes_submission(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        "#!/bin/sh\n"
+        "printf 'opencode 1.1.26\\n'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+
+    workspace = tmp_path / "workspace"
+    agent_dir = workspace / "agent"
+    audit_dir = agent_dir / "audit"
+    logs_dir = workspace / "logs"
+    audit_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "WORKSPACE_BASE": str(workspace),
+            "AGENT_DIR": str(agent_dir),
+            "AUDIT_DIR": str(audit_dir),
+            "LOGS_DIR": str(logs_dir),
+            "VLLM_API_BASE": "https://vllm.example.test/v1",
+            "VLLM_API_KEY": "vllm-key",
+            "VLLM_SERVED_MODEL_NAME": "Qwen/Qwen3.6-35B-A3B-FP8",
+            "MODEL": "openai/Qwen/Qwen3.6-35B-A3B-FP8",
+            "OPENCODE_DRY_RUN": "1",
+        }
+    )
+    env.pop("OPENROUTER_API_KEY", None)
+
+    start_sh = Path(agent_registry.get_agent("opencode-default").start_sh)
+    completed = subprocess.run(
+        ["bash", str(start_sh)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    assert "validated vllm/Qwen/Qwen3.6-35B-A3B-FP8" in completed.stdout
+    submission = agent_dir / "submission" / "audit.md"
+    assert submission.exists()
+    assert "OpenCode Modal dry run" in submission.read_text(encoding="utf-8")
+    trajectory = json.loads((logs_dir / "opencode" / "opencode.traj.json").read_text(encoding="utf-8"))
+    assert trajectory["dry_run"] is True
+    assert trajectory["json_event_count"] == 1
 
 
 def test_modal_baseline_invocation_uses_entrypoint_and_skips_runner_grading(tmp_path: Path, monkeypatch) -> None:
@@ -81,6 +327,46 @@ def test_modal_baseline_invocation_uses_entrypoint_and_skips_runner_grading(tmp_
     assert "--step-limit" in invocation.command
     assert "10" in invocation.command
     assert invocation.submission_path == tmp_path / "modal" / "submission" / "audit.md"
+
+
+def test_modal_opencode_invocation_uses_entrypoint_and_dry_run_flags(tmp_path: Path) -> None:
+    agent = Agent(
+        id="opencode-modal-qwen-vllm-dry-run",
+        name="opencode",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_opencode",
+        env_vars={
+            "MODEL": "openai/Qwen/Qwen3.6-35B-A3B-FP8",
+            "VLLM_API_BASE": "https://vllm.example.test/v1",
+            "VLLM_API_KEY": "vllm-key",
+            "OPENCODE_DRY_RUN": "1",
+            "MODAL_GRADE": "0",
+            "MODAL_OPENAI_SECRET_NAME": "",
+            "MODAL_COMMAND_TIMEOUT": "300",
+        },
+    )
+
+    invocation = build_modal_runner_invocation(
+        agent,
+        _task(),
+        tmp_path / "modal-opencode",
+        python_executable="python",
+    )
+
+    assert invocation.runner_name == "opencode"
+    assert invocation.command[:3] == [
+        "python",
+        str(Path("evmbench/agents/mini-swe-agent/entrypoint.py").resolve()),
+        "opencode",
+    ]
+    assert "--agent-id" in invocation.command
+    assert "opencode-modal-qwen-vllm-dry-run" in invocation.command
+    assert "--dry-run" in invocation.command
+    assert "--no-grade" in invocation.command
+    assert "--model" in invocation.command
+    assert "openai/Qwen/Qwen3.6-35B-A3B-FP8" in invocation.command
+    assert invocation.submission_path == tmp_path / "modal-opencode" / "submission" / "audit.md"
 
 
 def test_modal_forest_invocation_maps_budget_env(tmp_path: Path) -> None:

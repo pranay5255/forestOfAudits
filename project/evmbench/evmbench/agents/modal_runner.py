@@ -14,6 +14,7 @@ from evmbench.agents.agent import Agent
 MODAL_RUNNER_COMMANDS = {
     "modal_baseline": "baseline",
     "modal_forest": "forest",
+    "modal_opencode": "opencode",
 }
 
 SUBMISSION_FILENAMES = {
@@ -177,6 +178,13 @@ def build_modal_runner_invocation(
             if value and value.strip().lower() in {"1", "true", "yes", "on"}:
                 command.append("--continue-on-worker-error")
                 break
+    elif agent.runner == "modal_opencode":
+        command.extend(["--agent-id", agent.id])
+        _append_env_flag(command, env, "--modal-secret-name", "MODAL_OPENAI_SECRET_NAME")
+        _append_env_flag(command, env, "--judge-model", "JUDGE_MODEL")
+        _append_env_flag(command, env, "--judge-reasoning-effort", "JUDGE_REASONING_EFFORT")
+        _append_bool_env_flag(command, env, "--grade", "--no-grade", "MODAL_GRADE", "GRADE")
+        _append_bool_env_flag(command, env, "--dry-run", "--no-dry-run", "OPENCODE_DRY_RUN", "DRY_RUN")
 
     return ModalRunnerInvocation(
         command=command,

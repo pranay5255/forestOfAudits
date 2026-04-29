@@ -73,6 +73,8 @@ DTYPE = os.getenv("VLLM_DTYPE", "auto" if SINGLE_H100_PROFILE else "bfloat16")
 NUM_SPECULATIVE_TOKENS = int(os.getenv("VLLM_NUM_SPECULATIVE_TOKENS", "2"))
 STARTUP_TIMEOUT_SECONDS = int(os.getenv("VLLM_STARTUP_TIMEOUT_SECONDS", "600"))
 SCALEDOWN_WINDOW_SECONDS = int(os.getenv("VLLM_SCALEDOWN_WINDOW_SECONDS", "60"))
+ENABLE_AUTO_TOOL_CHOICE = _env_bool("VLLM_ENABLE_AUTO_TOOL_CHOICE", True)
+TOOL_CALL_PARSER = os.getenv("VLLM_TOOL_CALL_PARSER", "qwen3_xml").strip()
 
 _require_expensive_gpu_opt_in(GPU_CONFIG)
 
@@ -90,7 +92,8 @@ def _config_summary() -> str:
         f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION} mtp={ENABLE_MTP} "
         f"num_speculative_tokens={NUM_SPECULATIVE_TOKENS if ENABLE_MTP else 0} "
         f"fast_boot={FAST_BOOT} startup_timeout={STARTUP_TIMEOUT_SECONDS} "
-        f"scaledown_window={SCALEDOWN_WINDOW_SECONDS}"
+        f"scaledown_window={SCALEDOWN_WINDOW_SECONDS} "
+        f"auto_tool_choice={ENABLE_AUTO_TOOL_CHOICE} tool_call_parser={TOOL_CALL_PARSER or '-'}"
     )
 
 app = modal.App(APP_NAME)
@@ -102,14 +105,27 @@ vllm_secret = modal.Secret.from_name("evmbench-vllm-token", required_keys=[DEFAU
 image = (
     modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", add_python="3.12")
     .entrypoint([])
-    .pip_install("vllm==0.19.0", "huggingface_hub[hf_transfer]>=0.35.0")
+    .pip_install("vllm==0.19.0", "huggingface_hub[hf_transfer]>=0.35.0,<1.0")
     .env(
         {
             "HF_HOME": HF_CACHE_PATH,
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
             "HUGGINGFACE_HUB_CACHE": HF_CACHE_PATH,
             "VLLM_CACHE_ROOT": VLLM_CACHE_PATH,
-            "VLLM_USE_V1": "1",
+            "VLLM_LOGGING_LEVEL": os.getenv("VLLM_LOGGING_LEVEL", "WARNING"),
+            "VLLM_MODEL": MODEL_NAME,
+            "VLLM_SERVED_MODEL_NAME": SERVED_MODEL_NAME,
+            "VLLM_MODAL_GPU": GPU_CONFIG,
+            "VLLM_TENSOR_PARALLEL_SIZE": str(TENSOR_PARALLEL_SIZE),
+            "VLLM_MAX_MODEL_LEN": str(MAX_MODEL_LEN),
+            "VLLM_MAX_NUM_SEQS": str(MAX_NUM_SEQS),
+            "VLLM_GPU_MEMORY_UTILIZATION": GPU_MEMORY_UTILIZATION,
+            "VLLM_DTYPE": DTYPE,
+            "VLLM_ENABLE_MTP": "1" if ENABLE_MTP else "0",
+            "VLLM_NUM_SPECULATIVE_TOKENS": str(NUM_SPECULATIVE_TOKENS),
+            "VLLM_FAST_BOOT": "1" if FAST_BOOT else "0",
+            "VLLM_STARTUP_TIMEOUT_SECONDS": str(STARTUP_TIMEOUT_SECONDS),
+            "VLLM_SCALEDOWN_WINDOW_SECONDS": str(SCALEDOWN_WINDOW_SECONDS),
         }
     )
 )
@@ -179,6 +195,10 @@ def serve() -> None:
         "--uvicorn-log-level",
         "warning",
     ]
+    if ENABLE_AUTO_TOOL_CHOICE:
+        command.append("--enable-auto-tool-choice")
+    if TOOL_CALL_PARSER:
+        command.extend(["--tool-call-parser", TOOL_CALL_PARSER])
     if ENABLE_MTP:
         command.extend(
             [

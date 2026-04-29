@@ -44,24 +44,63 @@ def test_phase6_non_smoke_modal_variants_are_registered_without_fallback() -> No
     assert "MODAL_TASK" not in forest.env_vars
 
 
-def test_qwen_vllm_modal_variants_are_registered() -> None:
+def test_qwen_vllm_modal_variants_are_registered(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_SERVED_MODEL_NAME", "Qwen/Qwen3.6-35B-A3B-FP8")
+    monkeypatch.setenv("VLLM_LITELLM_MODEL", "openai/Qwen/Qwen3.6-35B-A3B-FP8")
+    model = "openai/Qwen/Qwen3.6-35B-A3B-FP8"
+
     baseline = agent_registry.get_agent("mini-swe-agent-modal-baseline-qwen-vllm")
     forest = agent_registry.get_agent("mini-swe-agent-modal-forest-qwen-vllm")
 
     assert baseline.runner == "modal_baseline"
-    assert baseline.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert baseline.env_vars["VLLM_API_BASE"] == "https://vllm.example.test/v1"
+    assert baseline.env_vars["VLLM_API_KEY"] == "vllm-key"
+    assert baseline.env_vars["MODEL"] == model
+    assert baseline.env_vars["MODEL_KWARGS_JSON"] == '{"drop_params":true}'
     assert baseline.env_vars["MODAL_OPENAI_SECRET_NAME"] == ""
     assert baseline.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
 
     assert forest.runner == "modal_forest"
-    assert forest.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
-    assert forest.env_vars["SCOUT_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
-    assert forest.env_vars["BRANCH_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
-    assert forest.env_vars["JUDGE_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
-    assert forest.env_vars["GLOBAL_MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B"
+    assert forest.env_vars["MODEL"] == model
+    assert forest.env_vars["SCOUT_MODEL"] == model
+    assert forest.env_vars["BRANCH_MODEL"] == model
+    assert forest.env_vars["JUDGE_MODEL"] == model
+    assert forest.env_vars["GLOBAL_MODEL"] == model
+    assert forest.env_vars["MODEL_KWARGS_JSON"] == '{"drop_params":true}'
     assert forest.env_vars["TREE_ROLES"] == "token-flow,accounting,access-control,cross-contract"
     assert forest.env_vars["FOREST_WORKER_CONCURRENCY"] == "4"
     assert forest.env_vars["MSWEA_COST_TRACKING"] == "ignore_errors"
+
+
+def test_qwen_vllm_debug_modal_forest_variants_are_registered(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_SERVED_MODEL_NAME", "Qwen/Qwen3.6-35B-A3B-FP8")
+    monkeypatch.setenv("VLLM_LITELLM_MODEL", "openai/Qwen/Qwen3.6-35B-A3B-FP8")
+    model = "openai/Qwen/Qwen3.6-35B-A3B-FP8"
+
+    two_tree = agent_registry.get_agent("mini-swe-agent-modal-forest-qwen-vllm-2trees-debug")
+    four_tree = agent_registry.get_agent("mini-swe-agent-modal-forest-qwen-vllm-4trees-debug")
+
+    assert two_tree.runner == "modal_forest"
+    assert two_tree.env_vars["MODEL"] == model
+    assert two_tree.env_vars["SCOUT_MODEL"] == model
+    assert two_tree.env_vars["MAX_TREE_ROLES"] == "2"
+    assert two_tree.env_vars["TREE_ROLES"] == "token-flow,accounting"
+    assert two_tree.env_vars["FOREST_WORKER_CONCURRENCY"] == "1"
+    assert two_tree.env_vars["FOREST_CONTINUE_ON_WORKER_ERROR"] == "1"
+
+    assert four_tree.runner == "modal_forest"
+    assert four_tree.env_vars["MODEL"] == model
+    assert four_tree.env_vars["MAX_TREE_ROLES"] == "4"
+    assert (
+        four_tree.env_vars["TREE_ROLES"]
+        == "token-flow,accounting,access-control,cross-contract"
+    )
+    assert four_tree.env_vars["FOREST_WORKER_CONCURRENCY"] == "2"
+    assert four_tree.env_vars["FOREST_CONTINUE_ON_WORKER_ERROR"] == "1"
 
 
 def test_phase6_gpt52_codex_8tree_modal_forest_variant_is_registered() -> None:
@@ -159,6 +198,12 @@ def test_phase6_runner_groups_cover_presentation_smoke_and_all_variants() -> Non
         "mini-swe-agent-default",
         "mini-swe-agent-smoke-10",
         "mini-swe-agent-gpt-5-mini",
+        "mini-swe-agent-qwen-vllm",
+        "mini-swe-agent-qwen-vllm-smoke-10",
+        "opencode-qwen-vllm",
+        "opencode-modal-qwen-vllm",
+        "opencode-modal-qwen-vllm-dry-run",
+        "opencode-modal-qwen-vllm-10min",
         "mini-swe-agent-modal-baseline",
         "mini-swe-agent-modal-baseline-smoke-10",
         "mini-swe-agent-modal-forest",
@@ -167,6 +212,8 @@ def test_phase6_runner_groups_cover_presentation_smoke_and_all_variants() -> Non
         "mini-swe-agent-modal-forest-gpt-5.2-codex-4trees-debug",
         "mini-swe-agent-modal-baseline-qwen-vllm",
         "mini-swe-agent-modal-forest-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm-2trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-4trees-debug",
     }.issubset(all_variants)
 
     forest_debug = {runner.agent_id for runner in phase6.parse_runner_list("forest-debug")}
@@ -177,8 +224,39 @@ def test_phase6_runner_groups_cover_presentation_smoke_and_all_variants() -> Non
     }
     vllm = {runner.agent_id for runner in phase6.parse_runner_list("vllm")}
     assert vllm == {
+        "mini-swe-agent-qwen-vllm",
+        "mini-swe-agent-qwen-vllm-smoke-10",
         "mini-swe-agent-modal-baseline-qwen-vllm",
         "mini-swe-agent-modal-forest-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm-2trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-4trees-debug",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("container-vllm")} == {
+        "mini-swe-agent-qwen-vllm",
+        "mini-swe-agent-qwen-vllm-smoke-10",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("opencode-vllm")} == {
+        "opencode-qwen-vllm",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("opencode-modal-vllm")} == {
+        "opencode-modal-qwen-vllm",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("opencode-modal-vllm-dry")} == {
+        "opencode-modal-qwen-vllm-dry-run",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("opencode-modal-vllm-10min")} == {
+        "opencode-modal-qwen-vllm-10min",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("modal-vllm")} == {
+        "mini-swe-agent-modal-baseline-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm-2trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-4trees-debug",
+    }
+    assert {runner.agent_id for runner in phase6.parse_runner_list("modal-vllm-debug")} == {
+        "mini-swe-agent-modal-baseline-qwen-vllm",
+        "mini-swe-agent-modal-forest-qwen-vllm-2trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-4trees-debug",
     }
 
 
@@ -189,6 +267,11 @@ def test_phase6_variants_command_lists_runnable_agent_ids(capsys) -> None:
     output = capsys.readouterr().out
     assert "presentation:" in output
     assert "mini-default\tmini-swe-agent-default" in output
+    assert "mini-qwen-vllm-smoke-10\tmini-swe-agent-qwen-vllm-smoke-10" in output
+    assert "opencode-qwen-vllm\topencode-qwen-vllm" in output
+    assert "opencode-modal-qwen-vllm\topencode-modal-qwen-vllm" in output
+    assert "opencode-modal-qwen-vllm-dry-run\topencode-modal-qwen-vllm-dry-run" in output
+    assert "opencode-modal-qwen-vllm-10min\topencode-modal-qwen-vllm-10min" in output
     assert "modal-forest-smoke\tmini-swe-agent-modal-forest-smoke" in output
     assert (
         "modal-forest-gpt52-codex-8trees"
@@ -199,6 +282,10 @@ def test_phase6_variants_command_lists_runnable_agent_ids(capsys) -> None:
         "\tmini-swe-agent-modal-forest-gpt-5.2-codex-2trees-debug"
     ) in output
     assert "modal-forest-qwen-vllm\tmini-swe-agent-modal-forest-qwen-vllm" in output
+    assert (
+        "modal-forest-qwen-vllm-2trees-debug"
+        "\tmini-swe-agent-modal-forest-qwen-vllm-2trees-debug"
+    ) in output
 
 
 def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: Path) -> None:
@@ -264,6 +351,59 @@ def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: P
     assert "runner,agent_id,audit_id,submission_exists" in (
         output_root / "phase6-slide-data.csv"
     ).read_text(encoding="utf-8")
+
+
+def test_phase6_summary_discovers_modal_opencode_trajectory_manifest(tmp_path: Path) -> None:
+    output_root = tmp_path / "phase6"
+    runner = phase6.RunnerSpec("opencode-modal-qwen-vllm-10min", "opencode-modal-qwen-vllm-10min", "OpenCode")
+    matrix = phase6.build_run_matrix(
+        output_root=output_root,
+        scope="smoke",
+        audits=["2024-01-canto"],
+        runners=[runner],
+    )
+    phase6.write_matrix(output_root, "smoke", matrix)
+
+    run_dir = output_root / "opencode-modal-qwen-vllm-10min" / "group" / "2024-01-canto_abc"
+    (run_dir / "submission").mkdir(parents=True)
+    (run_dir / "submission" / "audit.md").write_text("# Audit\n", encoding="utf-8")
+    opencode_logs = run_dir / "modal" / "logs" / "opencode"
+    opencode_logs.mkdir(parents=True)
+    (opencode_logs / "opencode.traj.json").write_text(
+        json.dumps({"trajectory_format": "opencode-run-jsonl-v1"}) + "\n",
+        encoding="utf-8",
+    )
+    (opencode_logs / "trajectory-manifest.json").write_text(
+        json.dumps(
+            {
+                "expected_trajectory_count": 1,
+                "found_trajectory_count": 1,
+                "missing_trajectory_count": 0,
+                "missing_trajectory_workers": [],
+                "workers": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.log").write_text(
+        str(
+            {
+                "event": "[2024-01-canto] Grade:\n",
+                "grade": {"evmbench_result": {"score": 0, "max_score": 2}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = phase6.summarize_phase6(output_root)
+
+    row = payload["rows"][0]
+    assert row["trajectory_manifest"] == "modal/logs/opencode/trajectory-manifest.json"
+    assert row["trajectory_paths"] == ["modal/logs/opencode/opencode.traj.json"]
+    assert row["expected_trajectory_count"] == 1
+    assert row["found_trajectory_count"] == 1
+    assert row["failure_reason"] is None
 
 
 def test_phase6_summary_uses_mode_specific_submission_artifact(tmp_path: Path) -> None:

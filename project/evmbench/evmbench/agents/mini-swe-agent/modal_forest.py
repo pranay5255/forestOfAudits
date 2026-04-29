@@ -15,6 +15,7 @@ Only the global judge output is extracted as `submission/audit.md`.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -155,12 +156,17 @@ class ForestConfig:
     def metadata_path(self) -> Path:
         return self.output_dir / "logs" / "modal-forest-result.json"
 
+    @property
+    def trajectory_manifest_path(self) -> Path:
+        return self.output_dir / "logs" / "forest" / "trajectory-manifest.json"
+
 
 @dataclass(frozen=True)
 class WorkerResult:
     mode: Mode
     worker_type: str
     worker_name: str
+    model: str
     role: str | None
     branch: str | None
     trajectory_path: Path
@@ -168,6 +174,7 @@ class WorkerResult:
     error: str | None
     started_at: float
     ended_at: float
+    agent_run_started: bool = False
     output_path: str | None = None
     final_artifact_path: str | None = None
     extracted_artifact_paths: tuple[str, ...] = ()
@@ -177,9 +184,9 @@ class WorkerResult:
     def runtime_seconds(self) -> float:
         return self.ended_at - self.started_at
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, output_dir: Path | None = None) -> dict[str, Any]:
         payload = asdict(self)
-        payload["trajectory_path"] = str(self.trajectory_path)
+        payload["trajectory_path"] = _local_metadata_path(output_dir, self.trajectory_path)
         payload["runtime_seconds"] = self.runtime_seconds
         return payload
 
@@ -300,11 +307,102 @@ def _scoped_agent_instructions(instructions: str, scope_files: tuple[str, ...]) 
     )
 
 
+def _local_metadata_path(output_dir: Path | None, path: Path | str | None) -> str | None:
+    """Render local run artifacts without leaking absolute host paths."""
+    if path is None:
+        return None
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    if output_dir is not None:
+        try:
+            return candidate.resolve().relative_to(output_dir.resolve()).as_posix()
+        except ValueError:
+            pass
+    return candidate.name or "."
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _json_ready_config(config: ForestConfig) -> dict[str, Any]:
     payload = asdict(config)
-    payload["output_dir"] = str(config.output_dir)
-    payload["metadata_path"] = str(config.metadata_path)
+    payload["output_dir"] = "."
+    payload["metadata_path"] = _local_metadata_path(config.output_dir, config.metadata_path)
+    payload["trajectory_manifest_path"] = _local_metadata_path(config.output_dir, config.trajectory_manifest_path)
     return payload
+
+
+def _append_error(existing: str | None, addition: str) -> str:
+    return f"{existing}; {addition}" if existing else addition
+
+
+def _result_by_worker_name(worker_results: list[WorkerResult]) -> dict[str, WorkerResult]:
+    return {result.worker_name: result for result in worker_results}
+
+
+def _trajectory_manifest_entry(
+    config: ForestConfig,
+    spec: WorkerSpec,
+    result: WorkerResult | None,
+) -> dict[str, Any]:
+    trajectory_exists = spec.trajectory_path.exists()
+    stat = spec.trajectory_path.stat() if trajectory_exists else None
+    worker_error = result.error if result else "worker did not run"
+    if result and result.agent_run_started and not trajectory_exists:
+        worker_error = _append_error(worker_error, "missing trajectory after DefaultAgent.run")
+    return {
+        "worker_name": spec.worker_name,
+        "worker_type": spec.worker_type,
+        "role": spec.role.name if spec.role else None,
+        "branch": branch_id(spec.branch_index) if spec.branch_index is not None else None,
+        "model": spec.model_name,
+        "trajectory_path": _local_metadata_path(config.output_dir, spec.trajectory_path),
+        "trajectory_exists": trajectory_exists,
+        "trajectory_bytes": stat.st_size if stat else None,
+        "trajectory_sha256": _sha256_file(spec.trajectory_path) if trajectory_exists else None,
+        "worker_error": worker_error,
+        "extracted_artifact_paths": list(result.extracted_artifact_paths if result else ()),
+        "agent_run_started": result.agent_run_started if result else False,
+    }
+
+
+def _build_trajectory_manifest(
+    config: ForestConfig,
+    *,
+    expected_specs: list[WorkerSpec],
+    worker_results: list[WorkerResult],
+    started_at: float,
+    ended_at: float,
+    error: str | None,
+) -> dict[str, Any]:
+    results_by_name = _result_by_worker_name(worker_results)
+    workers = [
+        _trajectory_manifest_entry(config, spec, results_by_name.get(spec.worker_name))
+        for spec in expected_specs
+    ]
+    missing_workers = [worker["worker_name"] for worker in workers if not worker["trajectory_exists"]]
+    return {
+        "manifest_version": 1,
+        "run_dir": ".",
+        "metadata_path": _local_metadata_path(config.output_dir, config.metadata_path),
+        "mode": config.mode,
+        "audit_id": config.audit_id,
+        "expected_trajectory_count": len(workers),
+        "found_trajectory_count": len(workers) - len(missing_workers),
+        "missing_trajectory_count": len(missing_workers),
+        "missing_trajectory_workers": missing_workers,
+        "workers": workers,
+        "run_error": error,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "runtime_seconds": ended_at - started_at,
+    }
 
 
 def _write_metadata(
@@ -312,19 +410,40 @@ def _write_metadata(
     *,
     scout_decision: ScoutDecision | None,
     selected_roles: Iterable[str],
+    expected_specs: list[WorkerSpec],
     worker_results: list[WorkerResult],
     started_at: float,
     ended_at: float,
     error: str | None = None,
 ) -> None:
     config.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    config.trajectory_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    trajectory_manifest = _build_trajectory_manifest(
+        config,
+        expected_specs=expected_specs,
+        worker_results=worker_results,
+        started_at=started_at,
+        ended_at=ended_at,
+        error=error,
+    )
+    config.trajectory_manifest_path.write_text(
+        json.dumps(trajectory_manifest, indent=2, default=str),
+        encoding="utf-8",
+    )
     payload = {
         "mode": config.mode,
-        "final_artifact_path": str(_local_final_artifact_path(config)),
+        "final_artifact_path": _local_metadata_path(config.output_dir, _local_final_artifact_path(config)),
+        "trajectory_manifest": _local_metadata_path(config.output_dir, config.trajectory_manifest_path),
+        "trajectory_integrity": {
+            "expected_trajectory_count": trajectory_manifest["expected_trajectory_count"],
+            "found_trajectory_count": trajectory_manifest["found_trajectory_count"],
+            "missing_trajectory_count": trajectory_manifest["missing_trajectory_count"],
+            "missing_trajectory_workers": trajectory_manifest["missing_trajectory_workers"],
+        },
         "config": _json_ready_config(config),
         "scout_decision": scout_decision.to_dict() if scout_decision else None,
         "selected_roles": list(selected_roles),
-        "workers": [worker.to_dict() for worker in worker_results],
+        "workers": [worker.to_dict(config.output_dir) for worker in worker_results],
         "error": error,
         "started_at": started_at,
         "ended_at": ended_at,
@@ -353,7 +472,7 @@ def _existing_local_artifact_paths(output_dir: Path, spec: WorkerSpec) -> tuple[
     for remote_path in spec.artifact_paths or ((spec.output_path,) if spec.output_path else ()):
         local_path = _local_path_for_remote(output_dir, remote_path)
         if local_path and local_path.exists():
-            paths.append(str(local_path))
+            paths.append(str(_local_metadata_path(output_dir, local_path)))
     return tuple(paths)
 
 
@@ -422,6 +541,8 @@ def _extract_worker_outputs(
     *,
     include_submission: bool = False,
 ) -> None:
+    # This collects sandbox artifacts only. The mini-swe-agent *.traj.json file is
+    # written by the host-side DefaultAgent loop that controls this Modal sandbox.
     entries = {
         f"{AGENT_DIR}/forest": "forest",
         LOGS_DIR: f"logs/forest/remote/{worker_name}",
@@ -546,6 +667,7 @@ def _run_worker(
     started_at = time.time()
     result: dict[str, Any] | None = None
     error: str | None = None
+    agent_run_started = False
     label = _worker_label(spec)
     _log(
         "worker start "
@@ -577,6 +699,7 @@ def _run_worker(
             cost_limit=spec.cost_limit,
             output_path=spec.trajectory_path,
         )
+        agent_run_started = True
         result = agent.run(spec.task, **spec.template_vars)
         _capture_branch_mode_artifacts(env, audit, config, spec, ploit_toml)
         if spec.include_submission:
@@ -602,6 +725,7 @@ def _run_worker(
         mode=config.mode,
         worker_type=spec.worker_type,
         worker_name=spec.worker_name,
+        model=spec.model_name,
         role=spec.role.name if spec.role else None,
         branch=branch_id(spec.branch_index) if spec.branch_index is not None else None,
         trajectory_path=spec.trajectory_path,
@@ -609,6 +733,7 @@ def _run_worker(
         error=error,
         started_at=started_at,
         ended_at=ended_at,
+        agent_run_started=agent_run_started,
         output_path=spec.output_path,
         final_artifact_path=final_submission_path(config.mode) if spec.include_submission else None,
         extracted_artifact_paths=_existing_local_artifact_paths(config.output_dir, spec),
@@ -845,6 +970,7 @@ def _run_specs_parallel(
                         mode=config.mode,
                         worker_type=spec.worker_type,
                         worker_name=spec.worker_name,
+                        model=spec.model_name,
                         role=spec.role.name if spec.role else None,
                         branch=branch_id(spec.branch_index) if spec.branch_index else None,
                         trajectory_path=spec.trajectory_path,
@@ -878,6 +1004,20 @@ def _check_stage_errors(
             f"Stage '{stage_name}' had {len(errors)} worker error(s) [{names}]. "
             f"Partial traces have been saved — check modal-forest-result.json for details."
         )
+
+
+def _trajectory_collection_errors(worker_results: list[WorkerResult]) -> list[str]:
+    return [
+        result.worker_name
+        for result in worker_results
+        if result.agent_run_started and not result.trajectory_path.exists()
+    ]
+
+
+def _check_trajectory_collection(worker_results: list[WorkerResult]) -> None:
+    missing = _trajectory_collection_errors(worker_results)
+    if missing:
+        raise RuntimeError("missing forest trajectories: " + ", ".join(sorted(missing)))
 
 
 def _select_roles(config: ForestConfig) -> tuple[ScoutDecision, tuple[TreeRole, ...]]:
@@ -930,6 +1070,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     )
     started_at = time.time()
     worker_results: list[WorkerResult] = []
+    expected_specs: list[WorkerSpec] = []
     scout_decision: ScoutDecision | None = None
     selected_roles: tuple[TreeRole, ...] = ()
     error: str | None = None
@@ -937,11 +1078,13 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
     try:
         # --- scout stage ---
         _log("stage start scout")
+        scout_spec = _scout_spec(config, audit_scope_files)
+        expected_specs.append(scout_spec)
         scout_result = _run_worker(
             config,
             audit,
             instructions,
-            _scout_spec(config, audit_scope_files),
+            scout_spec,
             openai_api_key=openai_api_key,
         )
         worker_results.append(scout_result)
@@ -958,11 +1101,13 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             f"roles={','.join(role.name for role in selected_roles)} "
             f"branches_per_tree={config.branches_per_tree}"
         )
+        branch_specs = _worker_specs_for_branches(config, selected_roles, audit_scope_files)
+        expected_specs.extend(branch_specs)
         branch_results = _run_specs_parallel(
             config,
             audit,
             instructions,
-            _worker_specs_for_branches(config, selected_roles, audit_scope_files),
+            branch_specs,
             openai_api_key=openai_api_key,
         )
         worker_results.extend(branch_results)
@@ -973,11 +1118,13 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
 
         # --- tree judges stage ---
         _log(f"stage start tree judges roles={','.join(role.name for role in selected_roles)}")
+        tree_judge_specs = _worker_specs_for_tree_judges(config, selected_roles, audit_scope_files)
+        expected_specs.extend(tree_judge_specs)
         tree_judge_results = _run_specs_parallel(
             config,
             audit,
             instructions,
-            _worker_specs_for_tree_judges(config, selected_roles, audit_scope_files),
+            tree_judge_specs,
             openai_api_key=openai_api_key,
         )
         worker_results.extend(tree_judge_results)
@@ -988,11 +1135,13 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
 
         # --- global judge stage ---
         _log("stage start global judge")
+        global_spec = _global_judge_spec(config, selected_roles, audit_scope_files)
+        expected_specs.append(global_spec)
         global_result = _run_worker(
             config,
             audit,
             instructions,
-            _global_judge_spec(config, selected_roles, audit_scope_files),
+            global_spec,
             openai_api_key=openai_api_key,
         )
         worker_results.append(global_result)
@@ -1004,6 +1153,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
         final_artifact = _local_final_artifact_path(config)
         if not final_artifact.exists():
             raise RuntimeError(f"Forest final submission was not extracted: {final_artifact}")
+        _check_trajectory_collection(worker_results)
         _log(f"final submission ready path={final_artifact}")
 
         return {
@@ -1012,7 +1162,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             "final_artifact_path": str(final_artifact),
             "selected_roles": [role.name for role in selected_roles],
             "audit_scope_files": list(audit_scope_files),
-            "workers": [worker.to_dict() for worker in worker_results],
+            "workers": [worker.to_dict(config.output_dir) for worker in worker_results],
         }
     except Exception as exc:
         error = str(exc)
@@ -1024,6 +1174,7 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             config,
             scout_decision=scout_decision,
             selected_roles=[role.name for role in selected_roles],
+            expected_specs=expected_specs,
             worker_results=worker_results,
             started_at=started_at,
             ended_at=ended_at,

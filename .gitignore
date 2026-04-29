@@ -3,6 +3,12 @@
 .idea/**
 /.envrc
 
+# Local Codex/agent session markers
+.codex
+
+# Accidental root lockfile; project lockfiles live under project/*/uv.lock
+/uv.lock
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

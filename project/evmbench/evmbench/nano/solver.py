@@ -1,12 +1,14 @@
 import asyncio
 import json
 import os
+import shutil
 import shlex
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlparse
 
 import blobfile as bf
 import structlog.stdlib
@@ -31,7 +33,7 @@ from evmbench.agents.agent import Agent, AgentOutput, agent_registry
 from evmbench.agents.modal_runner import run_modal_runner
 from evmbench.agents.run import run_agent_in_computer
 from evmbench.constants import AUDIT_DIR, AGENT_DIR, SUBMISSION_DIR
-from evmbench.nano.grade import EVMbenchGrade
+from evmbench.nano.grade import EVMbenchDetectResult, EVMbenchGrade, EVMbenchResult
 from evmbench.nano.task import EVMTask
 from evmbench.utils import get_audits_dir, purple
 from evmbench.nano.gateway import (
@@ -45,6 +47,30 @@ from evmbench.nano.gateway import (
 from evmbench.nano.runtime import EVMRuntimeConfig
 
 logger = structlog.stdlib.get_logger(component=__name__)
+
+
+def _usable_env_value(value: str | None) -> str:
+    stripped = (value or "").strip()
+    if not stripped or stripped.startswith("${{"):
+        return ""
+    return stripped
+
+
+def _hostname_from_api_base(value: str | None) -> str:
+    api_base = _usable_env_value(value)
+    if not api_base:
+        return ""
+    parsed = urlparse(api_base if "://" in api_base else f"https://{api_base}")
+    return (parsed.hostname or "").strip()
+
+
+def _container_gateway_sni_hosts(agent: Agent, env: dict[str, str] | None) -> list[str]:
+    allowed_hosts = list(agent.gateway_sni_hosts or ["api.openai.com"])
+    for name in ("VLLM_API_BASE", "OPENAI_API_BASE", "OPENAI_BASE_URL"):
+        hostname = _hostname_from_api_base((env or {}).get(name))
+        if hostname and hostname not in allowed_hosts:
+            allowed_hosts.append(hostname)
+    return allowed_hosts
 
 
 @chz.chz
@@ -110,8 +136,8 @@ class EVMbenchSolver(PythonCodingSolver):
         # If disable_internet is enabled, we put the agent container on a docker "internal" network
         # (no web access) while still allowing model API calls via a gateway sidecar.
         if agent.runner == "container" and self.disable_internet and self.agent_id != "human":
-            allowed_sni_hosts = agent.gateway_sni_hosts or ["api.openai.com"]
             cluster_config.environment = cluster_config.environment or {}
+            allowed_sni_hosts = _container_gateway_sni_hosts(agent, cluster_config.environment)
             cluster_config.environment.update(
                 {
                     GATEWAY_HOST_ENV: DEFAULT_GATEWAY_HOST,
@@ -136,12 +162,32 @@ class EVMbenchSolver(PythonCodingSolver):
             runs_dir=task.runs_dir,
         )
 
+        agent = agent_registry.get_agent(self.runtime_config.agent_id)
+        if agent.runner != "container":
+            try:
+                agent_output = await self._run_modal_agent_without_local_computer(task, agent)
+                grade = self._modal_runner_grade(task, agent_output)
+                ctx_logger.info(
+                    f"[{task.audit.id}] Graded. Score: {grade.evmbench_result.score}/{grade.evmbench_result.max_score}",
+                    destinations=["group", "run"],
+                    _print=True,
+                )
+                ctx_logger.info(
+                    f"[{task.audit.id}] Grade:\n",
+                    grade=grade.dict(),
+                    destinations=["run"],
+                )
+            except Exception as e:
+                raise RolloutSystemError(f"Rollout failed with error: {str(e)}") from e
+
+            yield FinalResult(grade=grade)
+            return
+
         try:
             async with self._start_computer(task) as computer:
                 # 1. Run the task setup
                 await task.setup(computer, self.runtime_config)
 
-                agent = agent_registry.get_agent(self.runtime_config.agent_id)
                 if agent.runner == "container":
                     await self._prepare_container_agent(computer, task, agent)
                     await self._configure_container_network(computer, agent)
@@ -167,6 +213,40 @@ class EVMbenchSolver(PythonCodingSolver):
             raise RolloutSystemError(f"Rollout failed with error: {str(e)}") from e
 
         yield FinalResult(grade=grade)
+
+    def _modal_runner_grade(self, task: EVMTask, agent_output: AgentOutput) -> EVMbenchGrade:
+        if task.mode == "detect":
+            result = EVMbenchDetectResult(
+                audit_id=task.audit.id,
+                score=0,
+                max_score=len(task.audit.vulnerabilities),
+                detect_award=0.0,
+                detect_max_award=task.audit.detect_max_award,
+                agent_output=agent_output,
+                details={"modal_runner": True, "graded_in_modal_runner": False},
+            )
+        else:
+            result = EVMbenchResult(
+                audit_id=task.audit.id,
+                score=0,
+                max_score=len(task.audit.vulnerabilities),
+                agent_output=agent_output,
+                details={"modal_runner": True, "graded_in_modal_runner": False},
+            )
+        return EVMbenchGrade(
+            score=result.score,
+            grader_log="Modal runner completed; local Docker grading was skipped.",
+            evmbench_result=result,
+        )
+
+    def _submission_filename(self, mode: str) -> str:
+        if mode == "detect":
+            return "audit.md"
+        if mode == "patch":
+            return "agent.diff"
+        if mode == "exploit":
+            return "txs.json"
+        raise RuntimeError(f"Unsupported EVMBench mode for Modal runner: {mode!r}.")
 
     async def _prepare_container_agent(
         self,
@@ -227,7 +307,7 @@ class EVMbenchSolver(PythonCodingSolver):
         if self.agent_id == "human" or not self.disable_internet:
             return
 
-        allowed_sni_hosts = agent.gateway_sni_hosts or ["api.openai.com"]
+        allowed_sni_hosts = _container_gateway_sni_hosts(agent, agent.env_vars)
         # Network rewiring needs access to LocalCluster internals; it does not
         # require Jupyter support.
         if getattr(computer, "_cluster", None) is None:
@@ -352,7 +432,7 @@ class EVMbenchSolver(PythonCodingSolver):
         await put_file_in_computer(
             computer,
             str(result.invocation.submission_path),
-            f"{SUBMISSION_DIR}/audit.md",
+            f"{SUBMISSION_DIR}/{self._submission_filename(task.mode)}",
         )
         if result.stdout.strip():
             ctx_logger.info(
@@ -366,6 +446,50 @@ class EVMbenchSolver(PythonCodingSolver):
             )
         end = time.time()
         return AgentOutput(time_start=start, time_end=end, runtime_in_seconds=end - start)
+
+    async def _run_modal_agent_without_local_computer(
+        self,
+        task: EVMTask,
+        agent: Agent,
+    ) -> AgentOutput:
+        ctx_logger = logger.bind(
+            run_group_id=task.run_group_id,
+            run_id=task.run_id,
+            runs_dir=task.runs_dir,
+        )
+        run_dir = Path(task.run_dir)
+        output_dir = run_dir / "modal"
+        start = time.time()
+        result = await asyncio.to_thread(run_modal_runner, agent, task, output_dir)
+
+        source_submission = result.invocation.submission_path
+        target_submission = run_dir / "submission" / self._submission_filename(task.mode)
+        target_submission.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_submission, target_submission)
+
+        if result.stdout.strip():
+            ctx_logger.info(
+                f"Modal runner stdout tail:\n{result.stdout[-4000:]}",
+                destinations=["run"],
+            )
+        if result.stderr.strip():
+            ctx_logger.warning(
+                f"Modal runner stderr tail:\n{result.stderr[-4000:]}",
+                destinations=["run"],
+            )
+        end = time.time()
+        agent_output = AgentOutput(time_start=start, time_end=end, runtime_in_seconds=end - start)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with bf.BlobFile(bf.join(task.runs_dir, task.run_group_id, task.run_id, "metadata.json"), "w") as f:
+            json.dump(asdict(agent_output), f, indent=4)
+        get_recorder().record_extra(
+            {
+                "run_group_id": task.run_group_id,
+                "run_id": task.run_id,
+                "agent_output": asdict(agent_output),
+            }
+        )
+        return agent_output
 
     async def _run_agent(self, computer: ComputerInterface, task: EVMTask) -> AgentOutput:
         ctx_logger = logger.bind(

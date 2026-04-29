@@ -87,6 +87,72 @@ jq '.rows[] | {runner, audit_id, submission_exists, failure_reason, selected_rol
   runs/phase6/debug-gpt52-2tree-canto/phase6-results.json
 ```
 
+## Qwen vLLM Forest Ladder
+
+Use this when the deployed vLLM endpoint is already healthy and you want the
+mini-swe-agent forest path to call that endpoint for scouts, branch workers,
+tree judges, and the global judge.
+
+Required `.env` values:
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `VLLM_API_BASE` | OpenAI-compatible vLLM `/v1` endpoint | `https://...modal.run/v1` |
+| `VLLM_API_KEY` | Token accepted by the vLLM auth layer | local secret value |
+| `VLLM_SERVED_MODEL_NAME` | Exact served model from `/v1/models` | `Qwen/Qwen3.6-35B-A3B-FP8` |
+| `VLLM_LITELLM_MODEL` | LiteLLM model name used by mini-swe-agent | `openai/Qwen/Qwen3.6-35B-A3B-FP8` |
+| `MODEL_KWARGS_JSON` | Drops OpenAI-only params before vLLM calls | `{"drop_params":true}` |
+| `MSWEA_COST_TRACKING` | Avoids cost lookup failures for self-hosted Qwen | `ignore_errors` |
+| `VLLM_SCALEDOWN_WINDOW_SECONDS` | Keeps the vLLM app warm during Modal audit setup | `1800` |
+
+Preview the vLLM-specific runners:
+
+```bash
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh variants | rg 'qwen-vllm|modal-vllm'
+
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh plan \
+  --audits 2024-01-canto \
+  --runners modal-vllm-debug
+```
+
+### Q1. Qwen vLLM 2-Tree Debug
+
+```bash
+PHASE6_ITEM_TIMEOUT_SECONDS=7200 \
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
+  --audits 2024-01-canto \
+  --runners modal-forest-qwen-vllm-2trees-debug \
+  --output-root runs/phase6/debug-qwen-vllm-2tree-canto \
+  --stop-on-failure
+```
+
+This validates the full forest lifecycle against vLLM with `token-flow` and
+`accounting`. Worker concurrency is set to 1 so a single H100 endpoint is not
+hit by multiple mini-swe-agent loops while you are debugging wiring.
+
+Check:
+
+```bash
+jq '.rows[] | {runner, audit_id, submission_exists, failure_reason, selected_roles, forest_worker_errors}' \
+  runs/phase6/debug-qwen-vllm-2tree-canto/phase6-results.json
+```
+
+### Q2. Qwen vLLM 4-Tree Debug
+
+```bash
+PHASE6_ITEM_TIMEOUT_SECONDS=10800 \
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
+  --audits 2024-01-canto \
+  --runners modal-forest-qwen-vllm-4trees-debug \
+  --output-root runs/phase6/debug-qwen-vllm-4tree-canto \
+  --stop-on-failure
+```
+
+This adds `access-control` and `cross-contract` and raises worker concurrency to
+2. Move to the full `modal-forest-qwen-vllm` runner only after this writes
+`modal/logs/modal-forest-result.json` and either a submission or a clear
+row-level failure.
+
 ### 4. GPT-5.2 Codex 4-Tree Debug
 
 ```bash

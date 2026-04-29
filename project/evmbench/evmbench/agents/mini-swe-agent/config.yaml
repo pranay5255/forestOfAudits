@@ -4,6 +4,21 @@ env-config-vars: &env-config-vars
   STEP_LIMIT: "50"
   COST_LIMIT: "20.0"
 
+qwen-vllm-vars: &qwen-vllm-vars
+  VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+  VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+  VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+  MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+  MODEL_KWARGS_JSON: '{"drop_params":true}'
+  MSWEA_COST_TRACKING: ignore_errors
+
+qwen-vllm-forest-model-vars: &qwen-vllm-forest-model-vars
+  <<: *qwen-vllm-vars
+  SCOUT_MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+  BRANCH_MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+  JUDGE_MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+  GLOBAL_MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+
 modal-smoke-task: &modal-smoke-task >-
   This is a capped EVMBench detect integration smoke. Read
   /home/agent/AGENTS.md, inspect enough of /home/agent/audit to produce a
@@ -38,6 +53,20 @@ mini-swe-agent-gpt-5-mini:
     MODEL: openai/gpt-5-mini
     COST_LIMIT: "10.0"
 
+mini-swe-agent-qwen-vllm:
+  <<: *common_settings
+  env_vars:
+    <<: *qwen-vllm-vars
+    STEP_LIMIT: "50"
+    COST_LIMIT: "20.0"
+
+mini-swe-agent-qwen-vllm-smoke-10:
+  <<: *common_settings
+  env_vars:
+    <<: *qwen-vllm-vars
+    STEP_LIMIT: "10"
+    COST_LIMIT: "5.0"
+
 mini-swe-agent-modal-baseline:
   <<: *common_settings
   runner: modal_baseline
@@ -67,21 +96,16 @@ mini-swe-agent-modal-baseline-qwen-vllm:
   <<: *common_settings
   runner: modal_baseline
   env_vars:
-    MODEL: openai/Qwen/Qwen3.6-35B-A3B
+    <<: *qwen-vllm-vars
     STEP_LIMIT: "50"
     COST_LIMIT: "20.0"
     MODAL_OPENAI_SECRET_NAME: ""
-    MSWEA_COST_TRACKING: ignore_errors
 
 mini-swe-agent-modal-forest-qwen-vllm:
   <<: *common_settings
   runner: modal_forest
   env_vars:
-    MODEL: openai/Qwen/Qwen3.6-35B-A3B
-    SCOUT_MODEL: openai/Qwen/Qwen3.6-35B-A3B
-    BRANCH_MODEL: openai/Qwen/Qwen3.6-35B-A3B
-    JUDGE_MODEL: openai/Qwen/Qwen3.6-35B-A3B
-    GLOBAL_MODEL: openai/Qwen/Qwen3.6-35B-A3B
+    <<: *qwen-vllm-forest-model-vars
     SCOUT_STEP_LIMIT: "16"
     SCOUT_COST_LIMIT: "1.0"
     BRANCH_STEP_LIMIT: "36"
@@ -94,7 +118,44 @@ mini-swe-agent-modal-forest-qwen-vllm:
     MAX_TREE_ROLES: "4"
     TREE_ROLES: token-flow,accounting,access-control,cross-contract
     FOREST_WORKER_CONCURRENCY: "4"
-    MSWEA_COST_TRACKING: ignore_errors
+
+mini-swe-agent-modal-forest-qwen-vllm-2trees-debug:
+  <<: *common_settings
+  runner: modal_forest
+  env_vars:
+    <<: *qwen-vllm-forest-model-vars
+    SCOUT_STEP_LIMIT: "12"
+    SCOUT_COST_LIMIT: "1.0"
+    BRANCH_STEP_LIMIT: "20"
+    BRANCH_COST_LIMIT: "1.0"
+    JUDGE_STEP_LIMIT: "12"
+    JUDGE_COST_LIMIT: "0.75"
+    GLOBAL_STEP_LIMIT: "20"
+    GLOBAL_COST_LIMIT: "2.0"
+    BRANCHES_PER_TREE: "1"
+    MAX_TREE_ROLES: "2"
+    TREE_ROLES: token-flow,accounting
+    FOREST_WORKER_CONCURRENCY: "1"
+    FOREST_CONTINUE_ON_WORKER_ERROR: "1"
+
+mini-swe-agent-modal-forest-qwen-vllm-4trees-debug:
+  <<: *common_settings
+  runner: modal_forest
+  env_vars:
+    <<: *qwen-vllm-forest-model-vars
+    SCOUT_STEP_LIMIT: "16"
+    SCOUT_COST_LIMIT: "1.0"
+    BRANCH_STEP_LIMIT: "28"
+    BRANCH_COST_LIMIT: "1.25"
+    JUDGE_STEP_LIMIT: "16"
+    JUDGE_COST_LIMIT: "0.75"
+    GLOBAL_STEP_LIMIT: "28"
+    GLOBAL_COST_LIMIT: "2.5"
+    BRANCHES_PER_TREE: "1"
+    MAX_TREE_ROLES: "4"
+    TREE_ROLES: token-flow,accounting,access-control,cross-contract
+    FOREST_WORKER_CONCURRENCY: "2"
+    FOREST_CONTINUE_ON_WORKER_ERROR: "1"
 
 mini-swe-agent-modal-forest-gpt-5.2-codex-8trees:
   <<: *common_settings

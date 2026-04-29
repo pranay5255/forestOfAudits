@@ -58,3 +58,63 @@ opencode-openai-gpt-5.2:
   env_vars:
     <<: *env-config-vars
     MODEL: openai/gpt-5.2
+
+opencode-qwen-vllm:
+  <<: *common_settings
+  env_vars:
+    VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+    VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+    VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+    MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+    OPENCODE_PROVIDER_ID: vllm
+    OPENCODE_VLLM_OUTPUT_TOKEN_MAX: "8192"
+
+opencode-modal-qwen-vllm:
+  <<: *common_settings
+  runner: modal_opencode
+  env_vars:
+    VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+    VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+    VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+    MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+    OPENCODE_PROVIDER_ID: vllm
+    OPENCODE_VLLM_OUTPUT_TOKEN_MAX: "8192"
+    MODAL_OPENAI_SECRET_NAME: ""
+    MODAL_GRADE: "0"
+    MODAL_COMMAND_TIMEOUT: "10800"
+    MODAL_RUNTIME_TIMEOUT: "10800"
+    MSWEA_COST_TRACKING: ignore_errors
+
+opencode-modal-qwen-vllm-dry-run:
+  <<: *common_settings
+  runner: modal_opencode
+  env_vars:
+    VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+    VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+    VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+    MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+    OPENCODE_PROVIDER_ID: vllm
+    OPENCODE_DRY_RUN: "1"
+    OPENCODE_VLLM_OUTPUT_TOKEN_MAX: "8192"
+    MODAL_OPENAI_SECRET_NAME: ""
+    MODAL_GRADE: "0"
+    MODAL_COMMAND_TIMEOUT: "300"
+    MODAL_RUNTIME_TIMEOUT: "900"
+    MSWEA_COST_TRACKING: ignore_errors
+
+opencode-modal-qwen-vllm-10min:
+  <<: *common_settings
+  runner: modal_opencode
+  env_vars:
+    VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+    VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+    VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+    MODEL: ${{ secrets.VLLM_LITELLM_MODEL }}
+    OPENCODE_PROVIDER_ID: vllm
+    OPENCODE_AGENT_TIMEOUT_SECONDS: "540"
+    OPENCODE_VLLM_OUTPUT_TOKEN_MAX: "8192"
+    MODAL_OPENAI_SECRET_NAME: ""
+    MODAL_GRADE: "0"
+    MODAL_COMMAND_TIMEOUT: "660"
+    MODAL_RUNTIME_TIMEOUT: "780"
+    MSWEA_COST_TRACKING: ignore_errors

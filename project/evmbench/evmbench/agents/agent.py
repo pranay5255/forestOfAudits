@@ -22,7 +22,7 @@ class Agent:
     name: str
     start_sh: str
     instruction_file_name: str
-    runner: Literal["container", "modal_baseline", "modal_forest"] = "container"
+    runner: Literal["container", "modal_baseline", "modal_forest", "modal_opencode"] = "container"
     env_vars: dict[str, str] | None = None
     # When EVMbenchSolver.disable_internet is enabled, we use an L4 gateway that allowlists
     # TLS by SNI. This list configures which hostnames are permitted.
@@ -35,7 +35,7 @@ class AgentOutput:
     runtime_in_seconds: float
 
 class AgentRegistry:
-    _VALID_RUNNERS = {"container", "modal_baseline", "modal_forest"}
+    _VALID_RUNNERS = {"container", "modal_baseline", "modal_forest", "modal_opencode"}
 
     def _resolve_env_vars(self, env_vars: dict[str, str]) -> dict[str, str]:
         """

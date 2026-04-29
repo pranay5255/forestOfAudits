@@ -62,6 +62,28 @@ AVAILABLE_RUNNERS: tuple[RunnerSpec, ...] = (
     RunnerSpec("mini-default", "mini-swe-agent-default", "mini-swe-agent local default"),
     RunnerSpec("mini-smoke-10", "mini-swe-agent-smoke-10", "mini-swe-agent local smoke"),
     RunnerSpec("mini-gpt-5-mini", "mini-swe-agent-gpt-5-mini", "mini-swe-agent local GPT-5 mini"),
+    RunnerSpec("mini-qwen-vllm", "mini-swe-agent-qwen-vllm", "mini-swe-agent local Qwen vLLM"),
+    RunnerSpec(
+        "mini-qwen-vllm-smoke-10",
+        "mini-swe-agent-qwen-vllm-smoke-10",
+        "mini-swe-agent local Qwen vLLM smoke",
+    ),
+    RunnerSpec("opencode-qwen-vllm", "opencode-qwen-vllm", "OpenCode Qwen vLLM"),
+    RunnerSpec(
+        "opencode-modal-qwen-vllm",
+        "opencode-modal-qwen-vllm",
+        "Modal OpenCode Qwen vLLM",
+    ),
+    RunnerSpec(
+        "opencode-modal-qwen-vllm-dry-run",
+        "opencode-modal-qwen-vllm-dry-run",
+        "Modal OpenCode Qwen vLLM dry run",
+    ),
+    RunnerSpec(
+        "opencode-modal-qwen-vllm-10min",
+        "opencode-modal-qwen-vllm-10min",
+        "Modal OpenCode Qwen vLLM bounded 10 minute run",
+    ),
     RunnerSpec("modal-baseline", "mini-swe-agent-modal-baseline", "Modal single-agent baseline"),
     RunnerSpec(
         "modal-baseline-smoke-10",
@@ -95,50 +117,73 @@ AVAILABLE_RUNNERS: tuple[RunnerSpec, ...] = (
         "mini-swe-agent-modal-forest-qwen-vllm",
         "Modal forest/TTS with Qwen vLLM",
     ),
+    RunnerSpec(
+        "modal-forest-qwen-vllm-2trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-2trees-debug",
+        "Modal forest/TTS Qwen vLLM 2-tree debug",
+    ),
+    RunnerSpec(
+        "modal-forest-qwen-vllm-4trees-debug",
+        "mini-swe-agent-modal-forest-qwen-vllm-4trees-debug",
+        "Modal forest/TTS Qwen vLLM 4-tree debug",
+    ),
 )
+
+RUNNERS_BY_SLUG: dict[str, RunnerSpec] = {runner.slug: runner for runner in AVAILABLE_RUNNERS}
+
+
+def _runner_specs(*slugs: str) -> tuple[RunnerSpec, ...]:
+    return tuple(RUNNERS_BY_SLUG[slug] for slug in slugs)
+
 
 RUNNER_GROUPS: dict[str, tuple[RunnerSpec, ...]] = {
     "presentation": DEFAULT_RUNNERS,
     "default": DEFAULT_RUNNERS,
     "all": AVAILABLE_RUNNERS,
     "all-variants": AVAILABLE_RUNNERS,
-    "local": (
-        AVAILABLE_RUNNERS[1],
-        AVAILABLE_RUNNERS[2],
-        AVAILABLE_RUNNERS[3],
+    "local": _runner_specs("mini-default", "mini-smoke-10", "mini-gpt-5-mini"),
+    "modal": _runner_specs("modal-baseline", "modal-forest"),
+    "smoke": _runner_specs(
+        "codex-default",
+        "mini-smoke-10",
+        "modal-baseline-smoke-10",
+        "modal-forest-smoke",
     ),
-    "modal": (
-        AVAILABLE_RUNNERS[4],
-        AVAILABLE_RUNNERS[6],
+    "modal-smoke": _runner_specs("modal-baseline-smoke-10", "modal-forest-smoke"),
+    "forest-debug": _runner_specs(
+        "modal-forest-smoke",
+        "modal-forest-gpt52-codex-2trees-debug",
+        "modal-forest-gpt52-codex-4trees-debug",
     ),
-    "smoke": (
-        AVAILABLE_RUNNERS[0],
-        AVAILABLE_RUNNERS[2],
-        AVAILABLE_RUNNERS[5],
-        AVAILABLE_RUNNERS[7],
+    "modal-debug": _runner_specs(
+        "modal-baseline-smoke-10",
+        "modal-forest-smoke",
+        "modal-forest-gpt52-codex-2trees-debug",
+        "modal-forest-gpt52-codex-4trees-debug",
     ),
-    "modal-smoke": (
-        AVAILABLE_RUNNERS[5],
-        AVAILABLE_RUNNERS[7],
+    "vllm": _runner_specs(
+        "mini-qwen-vllm",
+        "mini-qwen-vllm-smoke-10",
+        "modal-baseline-qwen-vllm",
+        "modal-forest-qwen-vllm",
+        "modal-forest-qwen-vllm-2trees-debug",
+        "modal-forest-qwen-vllm-4trees-debug",
     ),
-    "forest-debug": (
-        AVAILABLE_RUNNERS[7],
-        AVAILABLE_RUNNERS[9],
-        AVAILABLE_RUNNERS[10],
+    "container-vllm": _runner_specs("mini-qwen-vllm", "mini-qwen-vllm-smoke-10"),
+    "opencode-vllm": _runner_specs("opencode-qwen-vllm"),
+    "opencode-modal-vllm": _runner_specs("opencode-modal-qwen-vllm"),
+    "opencode-modal-vllm-dry": _runner_specs("opencode-modal-qwen-vllm-dry-run"),
+    "opencode-modal-vllm-10min": _runner_specs("opencode-modal-qwen-vllm-10min"),
+    "modal-vllm": _runner_specs(
+        "modal-baseline-qwen-vllm",
+        "modal-forest-qwen-vllm",
+        "modal-forest-qwen-vllm-2trees-debug",
+        "modal-forest-qwen-vllm-4trees-debug",
     ),
-    "modal-debug": (
-        AVAILABLE_RUNNERS[5],
-        AVAILABLE_RUNNERS[7],
-        AVAILABLE_RUNNERS[9],
-        AVAILABLE_RUNNERS[10],
-    ),
-    "vllm": (
-        AVAILABLE_RUNNERS[11],
-        AVAILABLE_RUNNERS[12],
-    ),
-    "modal-vllm": (
-        AVAILABLE_RUNNERS[11],
-        AVAILABLE_RUNNERS[12],
+    "modal-vllm-debug": _runner_specs(
+        "modal-baseline-qwen-vllm",
+        "modal-forest-qwen-vllm-2trees-debug",
+        "modal-forest-qwen-vllm-4trees-debug",
     ),
 }
 
@@ -473,6 +518,13 @@ def _print_run_summary(output_root: Path, item: Phase6Run, status: dict[str, Any
     forest_workers = row.get("forest_workers") or []
     if selected_roles:
         _phase6_log(f"forest roles: {', '.join(str(role) for role in selected_roles)}")
+    if row.get("trajectory_manifest"):
+        _phase6_log(
+            "forest trajectories: "
+            f"{row.get('found_trajectory_count')}/{row.get('expected_trajectory_count')} "
+            f"found missing={row.get('missing_trajectory_count')} "
+            f"manifest={row.get('trajectory_manifest')}"
+        )
     for worker in forest_workers:
         if not isinstance(worker, dict):
             continue
@@ -680,15 +732,52 @@ def _relative_paths(paths: list[Path], base: Path) -> list[str]:
     return rendered
 
 
-def _modal_metadata(run_dir: Path | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+def _modal_metadata(
+    run_dir: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     if not run_dir:
-        return None, None, None
+        return None, None, None, None
     modal_logs = run_dir / "modal" / "logs"
     return (
         _read_json(modal_logs / "modal-runner-command.json"),
         _read_json(modal_logs / "modal-baseline-result.json"),
         _read_json(modal_logs / "modal-forest-result.json"),
+        _read_json(modal_logs / "modal-opencode-result.json"),
     )
+
+
+def _trajectory_manifest(run_dir: Path | None) -> tuple[str | None, dict[str, Any] | None]:
+    if not run_dir:
+        return None, None
+    candidates = [
+        run_dir / "modal" / "logs" / "forest" / "trajectory-manifest.json",
+        run_dir / "modal" / "logs" / "opencode" / "trajectory-manifest.json",
+        run_dir / "logs" / "forest" / "trajectory-manifest.json",
+        run_dir / "logs" / "opencode" / "trajectory-manifest.json",
+    ]
+    for path in candidates:
+        manifest = _read_json(path)
+        if manifest:
+            try:
+                return str(path.relative_to(run_dir)), manifest
+            except ValueError:
+                return str(path), manifest
+    return None, None
+
+
+def _manifest_count(manifest: dict[str, Any] | None, key: str) -> int:
+    if not manifest:
+        return 0
+    value = manifest.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _append_failure_reason(existing: str | None, reason: str) -> str:
+    if not existing:
+        return reason
+    if reason in existing:
+        return existing
+    return f"{existing}; {reason}"
 
 
 def _command_status(output_root: Path, item: Phase6Run) -> dict[str, Any] | None:
@@ -701,7 +790,11 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
     command_status = _command_status(output_root, item)
     submission_path = run_dir / "submission" / submission_filename(item.mode) if run_dir else None
     submission_exists = bool(submission_path and submission_path.exists() and submission_path.stat().st_size > 0)
-    modal_command, modal_baseline, modal_forest = _modal_metadata(run_dir)
+    modal_command, modal_baseline, modal_forest, modal_opencode = _modal_metadata(run_dir)
+    trajectory_manifest_path, trajectory_manifest = _trajectory_manifest(run_dir)
+    expected_trajectory_count = _manifest_count(trajectory_manifest, "expected_trajectory_count")
+    found_trajectory_count = _manifest_count(trajectory_manifest, "found_trajectory_count")
+    missing_trajectory_count = _manifest_count(trajectory_manifest, "missing_trajectory_count")
 
     score = _float_or_none(grade.get("score") if grade else None)
     max_score = _float_or_none(grade.get("max_score") if grade else None)
@@ -758,6 +851,8 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
         failure_reason = f"missing or empty submission/{submission_filename(item.mode)}"
     elif not grade:
         failure_reason = "grade not found in run.log"
+    if trajectory_manifest and missing_trajectory_count:
+        failure_reason = _append_failure_reason(failure_reason, "missing trajectories")
 
     return {
         "runner": item.runner,
@@ -778,9 +873,14 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
         "detect_award_percentage": _percentage(detect_award, detect_max_award),
         "agent_runtime_seconds": agent_runtime,
         "trajectory_paths": trajectory_paths,
+        "trajectory_manifest": trajectory_manifest_path,
+        "expected_trajectory_count": expected_trajectory_count,
+        "found_trajectory_count": found_trajectory_count,
+        "missing_trajectory_count": missing_trajectory_count,
         "modal_command": modal_command,
         "modal_baseline": modal_baseline,
         "modal_forest": modal_forest,
+        "modal_opencode": modal_opencode,
         "selected_roles": selected_roles,
         "forest_workers": forest_workers,
         "forest_worker_errors": forest_worker_errors,
@@ -860,8 +960,8 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             "",
             "## Per Audit",
             "",
-            "| Runner | Mode | Audit | Submission | Score | Detect Award | Runtime | Failure | Run Dir |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+            "| Runner | Mode | Audit | Submission | Trajectories | Score | Detect Award | Runtime | Failure | Run Dir |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for row in rows:
@@ -875,6 +975,11 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             if row.get("detect_award") is not None or row.get("detect_max_award") is not None
             else "-"
         )
+        trajectories = (
+            f"{row.get('found_trajectory_count')}/{row.get('expected_trajectory_count')}"
+            if row.get("expected_trajectory_count")
+            else "-"
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -883,6 +988,7 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
                     str(row.get("mode", "detect")),
                     str(row["audit_id"]),
                     "yes" if row.get("submission_exists") else "no",
+                    trajectories,
                     score,
                     award,
                     _fmt(row.get("agent_runtime_seconds")),
@@ -893,11 +999,22 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             + " |"
         )
 
-    forest_rows = [row for row in rows if row.get("selected_roles") or row.get("forest_worker_errors")]
+    forest_rows = [
+        row
+        for row in rows
+        if row.get("selected_roles") or row.get("forest_worker_errors") or row.get("trajectory_manifest")
+    ]
     if forest_rows:
         lines.extend(["", "## Forest Details", ""])
         for row in forest_rows:
             lines.append(f"- `{row['audit_id']}` roles: {', '.join(str(role) for role in row.get('selected_roles', [])) or '-'}")
+            if row.get("trajectory_manifest"):
+                lines.append(
+                    "  - trajectory integrity: "
+                    f"{row.get('found_trajectory_count')}/{row.get('expected_trajectory_count')} "
+                    f"found, missing={row.get('missing_trajectory_count')}, "
+                    f"manifest=`{row.get('trajectory_manifest')}`"
+                )
             for error in row.get("forest_worker_errors", []):
                 lines.append(f"  - `{error.get('worker_name')}`: {error.get('error')}")
 
@@ -961,6 +1078,10 @@ def _slide_audit_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "detect_award_percentage": row.get("detect_award_percentage"),
             "runtime_seconds": row.get("agent_runtime_seconds"),
             "failure_reason": row.get("failure_reason"),
+            "trajectory_manifest": row.get("trajectory_manifest"),
+            "expected_trajectory_count": row.get("expected_trajectory_count"),
+            "found_trajectory_count": row.get("found_trajectory_count"),
+            "missing_trajectory_count": row.get("missing_trajectory_count"),
             "run_dir": row.get("run_dir"),
         }
         for row in rows
@@ -972,7 +1093,7 @@ def _slide_forest_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         workers = row.get("forest_workers")
         selected_roles = row.get("selected_roles")
-        if not workers and not selected_roles:
+        if not workers and not selected_roles and not row.get("trajectory_manifest"):
             continue
         worker_list = workers if isinstance(workers, list) else []
         worker_runtimes = [worker.get("runtime_seconds") for worker in worker_list if isinstance(worker, dict)]
@@ -987,6 +1108,10 @@ def _slide_forest_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "worker_error_count": len(error_list),
                 "worker_total_runtime_seconds": _sum_numbers(worker_runtimes),
                 "worker_average_runtime_seconds": _avg_numbers(worker_runtimes),
+                "trajectory_manifest": row.get("trajectory_manifest"),
+                "expected_trajectory_count": row.get("expected_trajectory_count"),
+                "found_trajectory_count": row.get("found_trajectory_count"),
+                "missing_trajectory_count": row.get("missing_trajectory_count"),
                 "workers": worker_list,
                 "worker_errors": error_list,
             }
@@ -1024,6 +1149,10 @@ def write_slide_data(output_root: Path, slide_data: dict[str, Any]) -> None:
         "detect_award_percentage",
         "runtime_seconds",
         "failure_reason",
+        "trajectory_manifest",
+        "expected_trajectory_count",
+        "found_trajectory_count",
+        "missing_trajectory_count",
         "run_dir",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as file:
@@ -1066,7 +1195,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             default="presentation",
             help=(
                 "Comma-separated runner slugs, agent IDs, or groups. "
-                "Groups: presentation, smoke, local, modal, modal-smoke, all."
+                "Groups: presentation, smoke, local, modal, modal-smoke, forest-debug, "
+                "container-vllm, opencode-vllm, opencode-modal-vllm, "
+                "opencode-modal-vllm-dry, modal-vllm, modal-vllm-debug, vllm, all."
             ),
         )
         subparser.add_argument("--output-root", type=Path, default=None)

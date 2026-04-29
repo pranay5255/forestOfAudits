@@ -51,6 +51,7 @@ class VLLMServerConfig:
     dtype: str
     enable_mtp: bool
     num_speculative_tokens: str
+    tool_call_parser: str
     fast_boot: bool
     startup_timeout_seconds: int
     scaledown_window_seconds: int
@@ -99,6 +100,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default=clean_env_value(os.getenv("VLLM_DTYPE")))
     parser.add_argument("--enable-mtp", action=argparse.BooleanOptionalAction, default=env_bool("VLLM_ENABLE_MTP", True))
     parser.add_argument("--num-speculative-tokens", default=clean_env_value(os.getenv("VLLM_NUM_SPECULATIVE_TOKENS")) or "2")
+    parser.add_argument("--tool-call-parser", default=clean_env_value(os.getenv("VLLM_TOOL_CALL_PARSER")) or "qwen3_coder")
     parser.add_argument("--fast-boot", action=argparse.BooleanOptionalAction, default=env_bool("VLLM_FAST_BOOT", False))
     parser.add_argument(
         "--allow-expensive-gpu",
@@ -255,6 +257,7 @@ def _resolve_server_config(args: argparse.Namespace, cli_args: list[str]) -> VLL
         dtype=dtype,
         enable_mtp=args.enable_mtp,
         num_speculative_tokens=str(args.num_speculative_tokens),
+        tool_call_parser=args.tool_call_parser,
         fast_boot=args.fast_boot,
         startup_timeout_seconds=args.startup_timeout_seconds,
         scaledown_window_seconds=args.scaledown_window_seconds,
@@ -282,6 +285,7 @@ def _deploy_env(
             "VLLM_DTYPE": config.dtype,
             "VLLM_ENABLE_MTP": "1" if config.enable_mtp else "0",
             "VLLM_NUM_SPECULATIVE_TOKENS": config.num_speculative_tokens,
+            "VLLM_TOOL_CALL_PARSER": config.tool_call_parser,
             "VLLM_FAST_BOOT": "1" if config.fast_boot else "0",
             "VLLM_STARTUP_TIMEOUT_SECONDS": str(config.startup_timeout_seconds),
             "VLLM_SCALEDOWN_WINDOW_SECONDS": str(config.scaledown_window_seconds),
@@ -329,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[deploy]   max_model_len={config.max_model_len}", flush=True)
         print(f"[deploy]   max_num_seqs={config.max_num_seqs}", flush=True)
         print(f"[deploy]   dtype={config.dtype}", flush=True)
+        print(f"[deploy]   tool_call_parser={config.tool_call_parser}", flush=True)
         print(f"[deploy]   startup_timeout_seconds={config.startup_timeout_seconds}", flush=True)
         print(f"[deploy]   scaledown_window_seconds={config.scaledown_window_seconds}", flush=True)
         print(f"[deploy]   allow_expensive_gpu={args.allow_expensive_gpu}", flush=True)
@@ -384,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
                     "VLLM_MAX_MODEL_LEN": config.max_model_len,
                     "VLLM_MAX_NUM_SEQS": config.max_num_seqs,
                     "VLLM_DTYPE": config.dtype,
+                    "VLLM_TOOL_CALL_PARSER": config.tool_call_parser,
                     "VLLM_STARTUP_TIMEOUT_SECONDS": str(config.startup_timeout_seconds),
                     "VLLM_SCALEDOWN_WINDOW_SECONDS": str(config.scaledown_window_seconds),
                 },
@@ -404,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                 "max_model_len": config.max_model_len,
                 "max_num_seqs": config.max_num_seqs,
                 "dtype": config.dtype,
+                "tool_call_parser": config.tool_call_parser,
                 "startup_timeout_seconds": config.startup_timeout_seconds,
                 "scaledown_window_seconds": config.scaledown_window_seconds,
                 "verification": verification.__dict__,

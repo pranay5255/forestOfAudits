@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -260,6 +261,26 @@ def test_modal_baseline_config_keeps_explicit_api_base(tmp_path: Path, monkeypat
     config = modal_baseline.config_from_args(args)
 
     assert config.model_kwargs["api_base"] == "https://explicit.example.test/v1"
+
+
+def test_modal_baseline_resolve_model_api_key_prefers_vllm_when_base_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+
+    assert modal_baseline._resolve_model_api_key() == "vllm-key"
+    assert os.environ["OPENAI_API_KEY"] == "vllm-key"
+    assert os.environ["OPENAI_API_BASE"] == "https://vllm.example.test/v1"
+    assert os.environ["OPENAI_BASE_URL"] == "https://vllm.example.test/v1"
+
+
+def test_modal_baseline_resolve_model_api_key_requires_vllm_key_when_base_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+
+    with pytest.raises(RuntimeError, match="VLLM_API_KEY"):
+        modal_baseline._resolve_model_api_key()
 
 
 def test_modal_forest_config_injects_vllm_api_base(tmp_path: Path, monkeypatch) -> None:

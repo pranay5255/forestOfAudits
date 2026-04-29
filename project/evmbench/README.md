@@ -423,18 +423,37 @@ modal secret create openai-api-key OPENAI_API_KEY="$OPENAI_API_KEY"
 
 `evmbench/agents/mini-swe-agent/deploy_vllm.py` deploys an OpenAI-compatible
 vLLM server for `Qwen/Qwen3.6-35B-A3B`. The default deployment uses
-2x A100-80GB, tensor parallelism, BF16 weights, a 32K context window, Qwen
+a single B200, BF16 weights, a 32K context window, Qwen
 reasoning parsing, prefix caching, MTP speculative decoding, and
 `--language-model-only` to skip the vision encoder.
 
-Create the Modal secret used by the vLLM endpoint:
+Deploy and verify the endpoint. The script loads `.env`, creates or updates
+the `evmbench-vllm-token` Modal secret, deploys the app, checks `/health`,
+`/v1/models`, and `/v1/chat/completions`, then writes the resolved
+`VLLM_API_BASE` and `VLLM_API_KEY` back to `.env`:
 
 ```bash
-export VLLM_API_KEY="$(openssl rand -hex 32)"
-export HF_TOKEN="$(hf auth token)"  # or paste a Hugging Face read token
-modal secret create evmbench-vllm-token \
-  VLLM_API_KEY="$VLLM_API_KEY" \
-  HF_TOKEN="$HF_TOKEN"
+uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py
+```
+
+Use a single H100 with the FP8 checkpoint:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py --gpu H100
+```
+
+Use two H100s with the default BF16 checkpoint:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py --gpu H100:2
+```
+
+To verify an already deployed endpoint without redeploying:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
+  --skip-secret \
+  --skip-deploy
 ```
 
 Optionally pre-download the model into the Modal Hugging Face cache volume:
@@ -443,27 +462,23 @@ Optionally pre-download the model into the Modal Hugging Face cache volume:
 uv run modal run evmbench/agents/mini-swe-agent/deploy_vllm.py --download-only
 ```
 
-Deploy the endpoint:
-
-```bash
-uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
-```
-
-After Modal prints the web URL, point EVMBench/LiteLLM at the `/v1` route:
-
-```bash
-export VLLM_API_BASE="https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1"
-export MODEL="openai/Qwen/Qwen3.6-35B-A3B"
-export MSWEA_COST_TRACKING=ignore_errors
-```
-
 Run the vLLM smoke:
 
 ```bash
 evmbench/agents/mini-swe-agent/run_vllm_smoke.sh
 ```
 
-Use the registered vLLM agents in EVMBench:
+Run one basic Modal baseline detect task against the vLLM endpoint. The script
+loads `.env`, verifies the vLLM endpoint before spending a baseline run, starts
+the Modal sandbox agent, and fails unless `submission/audit.md` exists and is
+non-empty:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/run_vllm_modal_baseline.py \
+  --audit-id 2024-01-canto
+```
+
+Use the registered vLLM baseline agent in EVMBench:
 
 ```bash
 uv run python -m evmbench.nano.entrypoint \
@@ -472,13 +487,21 @@ uv run python -m evmbench.nano.entrypoint \
   evmbench.hint_level=none \
   evmbench.log_to_run_dir=True \
   evmbench.solver=evmbench.nano.solver.EVMbenchSolver \
-  evmbench.solver.agent_id=mini-swe-agent-modal-forest-qwen-vllm \
+  evmbench.solver.agent_id=mini-swe-agent-modal-baseline-qwen-vllm \
   runner.concurrency=1
 ```
+
+In the full EVMBench command, the agent call goes to vLLM. Detect grading still
+uses the configured EVMBench judge model.
 
 Useful deployment overrides:
 
 ```bash
+# Previous exact-BF16 default if you want to compare B200 against 2x A100-80GB.
+VLLM_MODAL_GPU=A100-80GB:2 \
+VLLM_TENSOR_PARALLEL_SIZE=2 \
+uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+
 # More context on more GPUs.
 VLLM_MODAL_GPU=H100:4 \
 VLLM_TENSOR_PARALLEL_SIZE=4 \

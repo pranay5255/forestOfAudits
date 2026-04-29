@@ -20,6 +20,7 @@ Modal secret: evmbench-vllm-token
 GPU profile: H100:1
 served model: Qwen/Qwen3.6-35B-A3B-FP8
 LiteLLM model: openai/Qwen/Qwen3.6-35B-A3B-FP8
+tool-call parser: qwen3_coder
 ```
 
 The scale-up rule is: do not promote to a larger run unless the previous run
@@ -91,6 +92,7 @@ VLLM_API_BASE=https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1
 VLLM_API_KEY=<redacted>
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B-FP8
 VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8
+VLLM_TOOL_CALL_PARSER=qwen3_coder
 VLLM_LITELLM_MODEL=openai/Qwen/Qwen3.6-35B-A3B-FP8
 MODEL=openai/Qwen/Qwen3.6-35B-A3B-FP8
 MODEL_KWARGS_JSON={"drop_params":true}
@@ -177,6 +179,7 @@ uv run evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
   --gpu H100 \
   --startup-timeout-seconds 1200 \
   --scaledown-window-seconds 43200 \
+  --tool-call-parser qwen3_coder \
   --wait-timeout 1800 \
   --request-timeout 300 \
   --chat-timeout 600
@@ -203,6 +206,7 @@ uv run evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
   --gpu H100 \
   --startup-timeout-seconds 1200 \
   --scaledown-window-seconds 43200 \
+  --tool-call-parser qwen3_coder \
   --wait-timeout 1800 \
   --request-timeout 300 \
   --chat-timeout 600
@@ -224,7 +228,8 @@ uv run evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
   --sync-secret \
   --write-env \
   --startup-timeout-seconds 1200 \
-  --scaledown-window-seconds 43200
+  --scaledown-window-seconds 43200 \
+  --tool-call-parser qwen3_coder
 ```
 
 ## 6. Required Tool-Call Preflight
@@ -265,6 +270,85 @@ curl --fail --show-error --silent \
 
 The response should contain a `tool_calls` entry. If it does not, fix the vLLM
 server tool parser before spending time on forest runs.
+
+## 6A. OpenCode vLLM Status From 2026-04-29
+
+OpenCode Modal runs use the same vLLM endpoint, but they are a separate
+promotion track from the mini-swe-agent forest runners. Do not promote OpenCode
+to longer scale-up runs until an OpenCode tool-use run completes with a real
+submission and complete trajectory integrity.
+
+The H100 endpoint was verified live with:
+
+```text
+app: evmbench-vllm-qwen
+GPU: H100:1
+model: Qwen/Qwen3.6-35B-A3B-FP8
+served model: Qwen/Qwen3.6-35B-A3B-FP8
+max model len: 32768
+tool call parser: qwen3_coder
+```
+
+Redeploy with the Qwen3.6 tool parser explicitly when refreshing the endpoint:
+
+```bash
+uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
+  --gpu H100 \
+  --max-model-len 32768 \
+  --startup-timeout-seconds 1200 \
+  --scaledown-window-seconds 1800 \
+  --tool-call-parser qwen3_coder \
+  --request-timeout 300 \
+  --chat-timeout 600
+```
+
+For OpenCode, keep the vLLM output cap below the deployed context window. The
+OpenRouter-era cap of `1000000` causes vLLM to reject requests. Current OpenCode
+vLLM settings:
+
+```text
+OPENCODE_PROVIDER_ID=vllm
+OPENCODE_VLLM_OUTPUT_TOKEN_MAX=4096
+OPENCODE_AGENT_TIMEOUT_SECONDS=540
+```
+
+The small OpenCode run command used for the 2026-04-29 check was:
+
+```bash
+PHASE6_ITEM_TIMEOUT_SECONDS=900 \
+evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
+  --audits 2024-01-canto \
+  --runners opencode-modal-qwen-vllm-10min \
+  --output-root runs/phase6/opencode-modal-vllm-10min-canto-traces \
+  --stop-on-failure
+```
+
+Observed result:
+
+```text
+Modal sandbox spawned: yes
+OpenCode reached vLLM: yes
+trajectory manifest: found 1/1, missing 0
+latest event count: 9 JSON events
+final audit report: no, placeholder only
+exit code: 1
+blocking error: AI_InvalidResponseDataError: Expected 'function.name' to be a string.
+```
+
+Latest artifact root from that check:
+
+```text
+runs/phase6/opencode-modal-vllm-10min-canto-traces/opencode-modal-qwen-vllm-10min/2026-04-29T20-57-45-GMT_run-group_opencode-modal-qwen-vllm-10min_detect/2024-01-canto_43a81b02-882b-48b9-988e-20f30ace8fed/modal
+```
+
+The important distinction is that basic chat and even some initial OpenCode
+tool steps can succeed while the OpenCode AI SDK still rejects a later tool-call
+delta. Treat this as a tool-call compatibility failure until OpenCode can run
+past repeated tool calls and write a non-placeholder `submission/audit.md`.
+
+When another Phase 6 run is active, do not stop the shared `swe-rex` Modal app
+globally. Stop only the local OpenCode process tree or the specific sandbox you
+own, otherwise unrelated Modal forest runs can be interrupted.
 
 ## 7. Plan The Debug Run
 
@@ -572,6 +656,9 @@ _phase6_command_logs/
 <runner>/<run-group>/<audit_run>/modal/logs/
 <runner>/<run-group>/<audit_run>/modal/logs/forest/trajectory-manifest.json
 <runner>/<run-group>/<audit_run>/modal/logs/forest/**/*.traj.json
+<runner>/<run-group>/<audit_run>/modal/logs/opencode/trajectory-manifest.json
+<runner>/<run-group>/<audit_run>/modal/logs/opencode/opencode.traj.json
+<runner>/<run-group>/<audit_run>/modal/logs/opencode/opencode-run.jsonl
 ```
 
 Put derived analysis under a sibling `analysis/`, `reports/`, or `dataset/`

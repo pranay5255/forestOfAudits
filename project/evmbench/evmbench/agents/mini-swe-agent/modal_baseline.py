@@ -616,6 +616,18 @@ def _model_kwargs_with_vllm_api_base(model_kwargs: dict[str, Any]) -> dict[str, 
 def _resolve_model_api_key() -> str:
     openai_api_key = _usable_api_key(os.getenv("OPENAI_API_KEY"))
     vllm_api_key = _usable_api_key(os.getenv("VLLM_API_KEY"))
+    vllm_api_base = _usable_api_key(os.getenv("VLLM_API_BASE"))
+    if vllm_api_base:
+        if not vllm_api_key:
+            raise RuntimeError(
+                "VLLM_API_BASE is set for a self-hosted vLLM endpoint, but VLLM_API_KEY is not set. "
+                "Set VLLM_API_KEY to the token configured on the vLLM server."
+            )
+        os.environ["OPENAI_API_KEY"] = vllm_api_key
+        os.environ["OPENAI_API_BASE"] = vllm_api_base
+        os.environ["OPENAI_BASE_URL"] = vllm_api_base
+        return vllm_api_key
+
     model_api_key = openai_api_key or vllm_api_key
     if not model_api_key:
         raise RuntimeError(

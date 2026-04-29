@@ -330,6 +330,7 @@ def test_modal_runner_environment_accepts_only_vllm_api_key(monkeypatch) -> None
 def test_modal_runner_environment_preserves_openai_api_key(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.delenv("VLLM_API_BASE", raising=False)
     agent = Agent(
         id="mini-swe-agent-modal-baseline",
         name="mini-swe-agent",
@@ -345,9 +346,49 @@ def test_modal_runner_environment_preserves_openai_api_key(monkeypatch) -> None:
     assert env["VLLM_API_KEY"] == "vllm-key"
 
 
+def test_modal_runner_environment_prefers_vllm_key_when_vllm_base_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("VLLM_API_KEY", "vllm-key")
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    agent = Agent(
+        id="mini-swe-agent-modal-baseline-qwen-vllm",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_baseline",
+        env_vars={"MODEL": "openai/Qwen/Qwen3.6-35B-A3B"},
+    )
+
+    env = modal_runner_environment(agent)
+
+    assert env["OPENAI_API_KEY"] == "vllm-key"
+    assert env["OPENAI_API_BASE"] == "https://vllm.example.test/v1"
+    assert env["OPENAI_BASE_URL"] == "https://vllm.example.test/v1"
+    assert env["VLLM_API_KEY"] == "vllm-key"
+    assert env["VLLM_API_BASE"] == "https://vllm.example.test/v1"
+
+
+def test_modal_runner_environment_requires_vllm_key_when_vllm_base_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    monkeypatch.setenv("VLLM_API_BASE", "https://vllm.example.test/v1")
+    agent = Agent(
+        id="mini-swe-agent-modal-baseline-qwen-vllm",
+        name="mini-swe-agent",
+        start_sh="unused",
+        instruction_file_name="AGENTS.md",
+        runner="modal_baseline",
+        env_vars={"MODEL": "openai/Qwen/Qwen3.6-35B-A3B"},
+    )
+
+    with pytest.raises(RuntimeError, match="VLLM_API_KEY"):
+        modal_runner_environment(agent)
+
+
 def test_modal_runner_environment_rejects_unresolved_secret_placeholders(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    monkeypatch.delenv("VLLM_API_BASE", raising=False)
     agent = Agent(
         id="mini-swe-agent-modal-baseline",
         name="mini-swe-agent",

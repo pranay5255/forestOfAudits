@@ -90,44 +90,10 @@ test -n "${MODAL_AUDIT_IMAGE_REPO:-}"
 uv run modal profile current
 ```
 
-For vLLM-backed runs, verify both normal chat and tool calls. A passing
-`/health` request is not enough because mini-swe-agent requires OpenAI-compatible
-tool calls.
-
-```bash
-python - <<'PY' >/tmp/vllm-tool-test.json
-import json, os
-model = os.environ.get("VLLM_SERVED_MODEL_NAME") or os.environ["VLLM_MODEL"]
-print(json.dumps({
-    "model": model,
-    "messages": [{"role": "user", "content": "Call bash to echo ok."}],
-    "tools": [{
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Execute a bash command",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
-        },
-    }],
-    "max_tokens": 64,
-    "temperature": 0,
-}))
-PY
-
-curl --fail --show-error --silent \
-  --header "Authorization: Bearer ${VLLM_API_KEY}" \
-  --header "Content-Type: application/json" \
-  --data @/tmp/vllm-tool-test.json \
-  "${VLLM_API_BASE%/}/chat/completions" \
-  | jq '.choices[0].message.tool_calls'
-```
-
-If this fails with a tool parser error, redeploy the vLLM server with tool
-calling enabled before running the forest.
+For vLLM-backed runs, run the chat and tool-call checks in
+`docs/vllm-modal-runbook.md` before launching the forest. A passing `/health`
+request is not enough because mini-swe-agent requires OpenAI-compatible tool
+calls.
 
 ## Study Queries
 

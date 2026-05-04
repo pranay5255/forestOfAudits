@@ -3,8 +3,10 @@
 Use this runbook when the goal is to run Phase 6 Modal forest experiments
 against the self-hosted Qwen vLLM endpoint.
 
-This file lives at the workspace root so it is easy to find on a live server.
-Run all commands from `project/evmbench` unless a step says otherwise.
+This file now lives under `project/evmbench/docs`. Run all commands from
+`project/evmbench` unless a step says otherwise. Use
+`docs/vllm-modal-runbook.md` as the standalone endpoint deploy and verification
+source of truth.
 
 ## 0. What This Runbook Assumes
 
@@ -58,7 +60,7 @@ modal app list
 ## 2. Enter The Project
 
 ```bash
-cd /home/pranay5255/forestOfAudits/project/evmbench
+cd /home/experiments_base/forestOfAudits/project/evmbench
 ```
 
 Check that the Phase 6 runner can list variants:
@@ -451,7 +453,7 @@ Start a persistent terminal:
 
 ```bash
 tmux new -s evmbench-phase6
-cd /home/pranay5255/forestOfAudits/project/evmbench
+cd /home/experiments_base/forestOfAudits/project/evmbench
 set -a
 . ./.env
 set +a

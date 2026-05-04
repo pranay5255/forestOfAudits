@@ -22,12 +22,14 @@ from deploy_vllm_server import (
 )
 from vllm_common import (
     DEFAULT_APP_NAME,
+    DEFAULT_IMAGE_REPO,
     DEFAULT_SECRET_NAME,
     api_base_from_server_root,
     clean_env_value,
     create_or_update_modal_secret,
     env_bool,
     fail,
+    litellm_model_name,
     load_project_env,
     project_root,
     redacted_length,
@@ -57,6 +59,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default=clean_env_value(os.getenv("VLLM_DTYPE")))
     parser.add_argument("--enable-mtp", action=argparse.BooleanOptionalAction, default=env_bool("VLLM_ENABLE_MTP", True))
     parser.add_argument("--num-speculative-tokens", default=clean_env_value(os.getenv("VLLM_NUM_SPECULATIVE_TOKENS")) or "2")
+    parser.add_argument("--tool-call-parser", default=clean_env_value(os.getenv("VLLM_TOOL_CALL_PARSER")) or "qwen3_coder")
     parser.add_argument("--fast-boot", action=argparse.BooleanOptionalAction, default=env_bool("VLLM_FAST_BOOT", False))
     parser.add_argument(
         "--startup-timeout-seconds",
@@ -125,9 +128,15 @@ def main(argv: list[str] | None = None) -> int:
                 "VLLM_DTYPE": config.dtype,
                 "VLLM_ENABLE_MTP": "1" if config.enable_mtp else "0",
                 "VLLM_NUM_SPECULATIVE_TOKENS": config.num_speculative_tokens,
+                "VLLM_TOOL_CALL_PARSER": config.tool_call_parser,
                 "VLLM_FAST_BOOT": "1" if config.fast_boot else "0",
                 "VLLM_STARTUP_TIMEOUT_SECONDS": str(config.startup_timeout_seconds),
                 "VLLM_SCALEDOWN_WINDOW_SECONDS": str(config.scaledown_window_seconds),
+                "VLLM_LITELLM_MODEL": litellm_model_name(config.served_model_name),
+                "MODEL": litellm_model_name(config.served_model_name),
+                "MODEL_KWARGS_JSON": '{"drop_params":true}',
+                "MSWEA_COST_TRACKING": "ignore_errors",
+                "MODAL_AUDIT_IMAGE_REPO": clean_env_value(os.getenv("MODAL_AUDIT_IMAGE_REPO")) or DEFAULT_IMAGE_REPO,
             }
             if api_base:
                 dotenv_values["VLLM_API_BASE"] = api_base

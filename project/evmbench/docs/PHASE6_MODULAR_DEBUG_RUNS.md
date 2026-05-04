@@ -93,6 +93,9 @@ Use this when the deployed vLLM endpoint is already healthy and you want the
 mini-swe-agent forest path to call that endpoint for scouts, branch workers,
 tree judges, and the global judge.
 
+Deploy and verify the endpoint with `docs/vllm-modal-runbook.md` first. This
+section only covers Phase 6 runner commands and output roots.
+
 Required `.env` values:
 
 | Variable | Purpose | Example |
@@ -127,8 +130,8 @@ evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
 ```
 
 This validates the full forest lifecycle against vLLM with `token-flow` and
-`accounting`. Worker concurrency is set to 1 so a single H100 endpoint is not
-hit by multiple mini-swe-agent loops while you are debugging wiring.
+`accounting`. Worker concurrency is set to 1 so the endpoint is not hit by
+multiple mini-swe-agent loops while you are debugging wiring.
 
 Check:
 
@@ -149,7 +152,8 @@ evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
 ```
 
 This adds `access-control` and `cross-contract` and raises worker concurrency to
-2. Move to the full `modal-forest-qwen-vllm` runner only after this writes
+2, matching the dual-H100 endpoint profile in `docs/vllm-modal-runbook.md`.
+Move to the full `modal-forest-qwen-vllm` runner only after this writes
 `modal/logs/modal-forest-result.json` and either a submission or a clear
 row-level failure.
 
@@ -221,3 +225,6 @@ For every debug output root, preserve:
 - `modal/logs/modal-forest-result.json` for forest runs
 - `modal/logs/forest/**/*.traj.json`
 - `submission/audit.md` when present
+
+These output roots are the intended `--input-root` values for the extractor
+planned in `docs/EXTRACT_FOREST_TRACES_PLAN.md`.

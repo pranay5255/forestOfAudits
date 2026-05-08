@@ -248,6 +248,75 @@ flowchart LR
   CHAIN -->|"veto forwards safe RPC"| CHAIN
 ```
 
+## Alcatraz Computer Interface Contract
+
+Alcatraz is not important because EVMBench needs Docker specifically. It is
+important because it gives `nanoeval` a small, stable "computer" interface that
+the rest of `evmbench.nano` can treat as a remote machine.
+
+At the `nanoeval` boundary, EVMBench mostly needs:
+
+```text
+computer.send_shell_command(cmd)
+computer.check_shell_command(cmd)
+computer.upload(bytes, remote_path)
+computer.download(remote_path)
+computer.fetch_container_names()
+```
+
+EVMBench adds a thin helper layer in `evmbench/alcatraz.py` for operations that
+must target a specific container:
+
+```text
+send_shell_command_in_container(computer, cmd, container_id=0)
+check_shell_command_in_container(computer, cmd, container_id=1)
+upload_to_container(computer, bytes, path, container_id=1)
+download_from_container(computer, path, container_id=1)
+```
+
+The normal `ComputerInterface` methods always target container `0`, the main
+agent container. Container-specific helpers only reach through to Alcatraz
+cluster internals when `container_id != 0`. That distinction is the key design
+constraint for any Modal replacement: the public object can look like one
+computer, but the adapter must still know how to route sidecar operations.
+
+For local detect and patch tasks, one task computer is enough:
+
+1. Start the audit image.
+2. Run `EVMTask.setup()`.
+3. Upload instructions and `start.sh`.
+4. Run the agent.
+5. Extract `/home/agent/submission`, `/home/logs`, and optional sessions.
+6. Start a fresh grading computer from the same image.
+7. Run mode-specific grading.
+
+For local exploit tasks with sidecar enabled, the rollout computer is a small
+cluster:
+
+- container `0`: agent workspace and final submission extraction;
+- container `1`: Anvil, `ploit setup`, Veto, transaction extraction;
+- optional gateway sidecar: model API egress allowlist for local container
+  agents.
+
+The exploit sidecar is a security boundary as well as a process layout. Anvil
+binds inside the chain container, Veto binds to `0.0.0.0` on the sidecar, and
+the agent receives an RPC URL pointing at the sidecar's Veto port. Hidden files
+such as `deploy.sh`, `utils.sh`, `.ploit.toml`, and Veto config are removed
+before the agent starts. After the agent finishes, the saved `.ploit.toml` is
+restored only long enough to run `ploit txs`, and the resulting `txs.json` is
+copied back into container `0`.
+
+The clean abstraction to preserve is therefore not "Docker cluster"; it is:
+
+```text
+TaskComputer
+  - main execution target for agent-visible shell/filesystem work
+  - optional named side targets for chain, gateway, or future services
+  - deterministic upload/download semantics
+  - explicit lifecycle cleanup
+  - enough identity metadata to debug a failed run
+```
+
 ## Agent Runner Branches
 
 The same `EVMbenchSolver.run` method handles local and Modal agents, but the
@@ -386,6 +455,198 @@ flowchart TD
   JUDGE2 --> ART
   GLOBAL --> ART
 ```
+
+## Recommended Modal Sandbox Scaling Strategy
+
+The current Modal path proves that audit images can run remotely, but it is not
+yet a full replacement for the nano/Alcatraz path. `EVMbenchSolver.run()` skips
+local Docker entirely for `modal_baseline`, `modal_forest`, and
+`modal_opencode`; `evmbench/agents/modal_runner.py` shells out to
+`mini-swe-agent/entrypoint.py`; the Modal runner creates SWE-ReX Modal
+environments; and the solver records a placeholder grade after a submission is
+copied back. That is useful for agent-scale experimentation, but it duplicates
+parts of `EVMTask.setup()` and `EVMTask.grade()` and currently bypasses local
+Docker grading.
+
+The recommended scaling direction is to make Modal Sandboxes implement the same
+computer contract that Alcatraz implements, then keep `evmbench.nano` as the
+source of truth for task setup, exploit harness behavior, extraction, and
+grading.
+
+```mermaid
+flowchart TD
+  NE["nanoeval scheduler<br/>run DB + retries"] --> SOLVER["EVMbenchSolver"]
+  SOLVER --> FACTORY{"runtime backend"}
+  FACTORY --> LOCAL["AlcatrazComputer<br/>Docker"]
+  FACTORY --> MODAL["ModalComputer<br/>modal.Sandbox"]
+
+  MODAL --> MAIN["main sandbox<br/>agent-visible audit image"]
+  MODAL --> CHAIN["optional chain sandbox or same-sandbox service<br/>Anvil + ploit + Veto"]
+  MODAL --> GRADE["fresh grading sandbox"]
+
+  MAIN --> TASK_SETUP["EVMTask.setup"]
+  CHAIN --> TASK_SETUP
+  TASK_SETUP --> AGENT["agent or forest worker"]
+  AGENT --> EXTRACT["submission + logs + trajectories"]
+  EXTRACT --> TASK_GRADE["EVMTask.grade"]
+  GRADE --> TASK_GRADE
+  TASK_GRADE --> RESULT["FinalResult"]
+```
+
+The target architecture has four pieces.
+
+1. Add a `ModalComputerInterface` and `ModalCluster` adapter.
+
+   The adapter should wrap one or more `modal.Sandbox` objects and expose the
+   methods used by `ComputerInterface` plus the container-specific methods used
+   by `evmbench/alcatraz.py`. `send_shell_command()` maps to
+   `Sandbox.exec()`, `upload()` and `download()` map to the Modal filesystem
+   APIs, and `fetch_container_names()` returns stable logical names such as
+   `["agent", "chain"]`. Store the Modal `object_id`, sandbox name, tags,
+   audit id, run id, retry index, worker name, image, and timeout in run
+   metadata.
+
+   Modal-specific defaults should be explicit:
+
+   ```text
+   app = modal.App.lookup("evmbench-sandboxes", create_if_missing=True)
+   sandbox timeout = task timeout plus cleanup margin
+   idle_timeout = short enough to clean abandoned workers
+   image = modal.Image.from_registry(remote_audit_image)
+   secrets = only when the sandbox itself needs them
+   tags = audit_id, mode, run_group_id, run_id, retry_idx, worker_type
+   ```
+
+   Modal Sandboxes default to a 5 minute lifetime unless a timeout is supplied,
+   and can run up to 24 hours. Always set the timeout; otherwise long audits can
+   fail for infrastructure reasons that look like agent failures.
+
+   Modal docs backing these assumptions: [Sandboxes](https://modal.com/docs/guide/sandboxes),
+   [running commands](https://modal.com/docs/guide/sandbox-spawn),
+   [filesystem access](https://modal.com/docs/guide/sandbox-files),
+   [networking and security](https://modal.com/docs/guide/sandbox-networking),
+   [snapshots](https://modal.com/docs/guide/sandbox-snapshots),
+   [job processing](https://modal.com/docs/guide/job-queue), and
+   [Docker in Sandboxes](https://modal.com/docs/guide/docker-in-sandboxes).
+
+2. Keep model calls outside the sandbox where possible.
+
+   The current mini-swe-agent design has the Python agent loop and LiteLLM model
+   calls in the host process while shell actions execute inside the Modal
+   sandbox. Preserve that for detect, patch, and forest workers. It means most
+   sandboxes do not need `OPENAI_API_KEY`, `VLLM_API_KEY`, or direct model
+   egress at all. The sandbox only needs the audit image, shell tools, and any
+   benchmark-local services such as Anvil and Veto.
+
+   For OpenCode-style agents that run the agent process inside the sandbox,
+   attach model credentials through Modal Secrets and tag those runs separately.
+   Do not pass secrets through generic JSON sandbox kwargs.
+
+3. Reuse `EVMTask.setup()` and `EVMTask.grade()` for Modal.
+
+   Detect mode is the easiest first target. The Modal computer only needs to
+   stage instructions, run the agent, extract `submission/audit.md`, and let the
+   detect grader run with the same judge code as local runs.
+
+   Patch mode is the next target. Use the same setup/reset logic, capture
+   `agent.diff` with `audit.get_diff_command()`, then launch a fresh Modal
+   grading sandbox and run the existing patch grader there. This removes the
+   current split where Modal can produce a patch but nano records only a
+   placeholder grade.
+
+   Exploit mode needs an explicit choice:
+
+   - Fast path: run Anvil, `ploit`, Veto, and the agent in one sandbox, matching
+     the current `modal_baseline.py` flow. This scales quickly and reuses the
+     hidden-file cleanup logic, but it is weaker than local sidecar isolation
+     because the raw Anvil port exists in the same sandbox.
+   - Parity path: model the rollout computer as two logical targets, `agent`
+     and `chain`. Expose only Veto from the chain target to the agent target,
+     keep raw Anvil local to the chain target, and implement
+     `send_shell_command_in_container(..., container_id=1)` against the chain
+     sandbox. Use this when exploit anti-cheat parity matters.
+   - Compatibility fallback: run Docker inside a Modal sandbox and keep the
+     existing Alcatraz topology inside that sandbox. Modal marks Docker in
+     Sandboxes as alpha and Docker state is not captured by filesystem
+     snapshots, so this should be a migration aid rather than the default
+     scale architecture.
+
+4. Make Modal the execution fleet, not a second benchmark framework.
+
+   Keep `nanoeval` responsible for task identity, retry policy, result
+   persistence, and summaries. Use Modal for the expensive per-task and
+   per-worker computers. If the local nanoeval process submits work to Modal
+   functions, use `Function.spawn()` for task jobs and record the function call
+   id next to the run id. If nanoeval itself runs inside Modal, move the run
+   database and artifacts to durable storage such as a Modal Volume or external
+   object store.
+
+   Concurrency must be budgeted at all three layers:
+
+   ```text
+   live_sandboxes ~= runner.concurrency
+                  * attempts_in_flight_per_task
+                  * sandboxes_per_attempt
+   ```
+
+   For forest:
+
+   ```text
+   sandboxes_per_attempt = 1 scout
+                         + roles * branches_per_tree
+                         + roles tree_judges
+                         + 1 global_judge
+                         + optional grading sandboxes
+   ```
+
+   During infrastructure debugging, set `runner.max_retries=0` and keep
+   `FOREST_WORKER_CONCURRENCY` small. At scale, put hard caps in the Modal
+   function or controller layer (`max_containers`, explicit worker pools, or a
+   queue) so a retry storm cannot multiply into thousands of sandboxes.
+
+### Implementation Phases
+
+Use this sequence to avoid mixing agent quality questions with infrastructure
+questions:
+
+1. Build `ModalComputerInterface` for a single sandbox and run one detect task
+   through `EVMTask.setup()` and `EVMTask.grade()` with `runner.max_retries=0`.
+2. Add patch mode and verify that a fresh Modal grading sandbox produces the
+   same score as local Docker for a known gold patch and a known bad patch.
+3. Add exploit single-sandbox mode, then decide whether the sidecar parity path
+   is required before large exploit sweeps.
+4. Refactor `modal_baseline`, `modal_opencode`, and `modal_forest` to request a
+   `TaskComputer` from the same factory instead of constructing SWE-ReX
+   environments directly.
+5. Add artifact durability: per-attempt output directories, Modal sandbox ids,
+   Modal function call ids, trajectory manifests, stdout/stderr tails, and
+   metadata JSON are written before any retry can overwrite them.
+6. Add warm-start optimization only after correctness is stable. Filesystem
+   snapshots can reduce startup latency and preserve prepared filesystem state;
+   directory snapshots are useful for reusable dependency trees; memory
+   snapshots are alpha and should not be required for benchmark correctness.
+
+### Modal Sandbox Operational Notes
+
+- Use registry-pullable audit images. Modal workers cannot rely on local
+  `evmbench/audit:<audit_id>` tags.
+- Prefer direct Modal Sandbox filesystem APIs for upload/download. Use tar
+  archives only for bulk directory transfer or compatibility with existing
+  SWE-ReX helpers.
+- Set `block_network=True` for sandboxes that do not need outbound network. If
+  the sandbox must reach a service, prefer a narrow `cidr_allowlist` or route
+  the call through the host/controller. This is easier when model calls stay out
+  of the sandbox.
+- Use named sandboxes only for singleton resources. Normal task sandboxes should
+  use unique names derived from `run_id`, `retry_idx`, and worker role.
+- Call `terminate()` or `stop()` in cleanup paths and detach client-side
+  handles after use. Abandoned sandboxes should also die via `idle_timeout`.
+- Store artifacts in a durable place. Modal Volumes are appropriate when many
+  sandboxes need the same data or when results must survive the host process;
+  call `sync` for intermediate results in long-running v2 volume workflows.
+- Put every retry in a distinct `attempt_<retry_idx>/modal/` directory. The
+  current shared `run_dir/modal` convention is convenient for smoke runs but can
+  overwrite the evidence needed for debugging and training data extraction.
 
 Formula for Modal forest worker count per full attempt:
 

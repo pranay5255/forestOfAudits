@@ -1,0 +1,29 @@
+openrouter-env-vars: &openrouter-env-vars
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  EVMBENCH_LLM_PROVIDER: ${{ secrets.EVMBENCH_LLM_PROVIDER }}
+  EVMBENCH_LLM_MODEL: ${{ secrets.EVMBENCH_LLM_MODEL }}
+  EVMBENCH_LLM_BASE_URL: ${{ secrets.EVMBENCH_LLM_BASE_URL }}
+  EVMBENCH_LLM_API_KEY_ENV: ${{ secrets.EVMBENCH_LLM_API_KEY_ENV }}
+
+codex-openrouter-v1:
+  start: codex-start.sh
+  instruction_file_name: AGENTS.md
+  gateway_sni_hosts:
+    - openrouter.ai
+    - api.openai.com
+  env_vars:
+    <<: *openrouter-env-vars
+
+opencode-openrouter-v1:
+  start: opencode-start.sh
+  instruction_file_name: AGENTS.md
+  gateway_sni_hosts:
+    - openrouter.ai
+    - api.openai.com
+    - models.dev
+    - opencode.ai
+  env_vars:
+    <<: *openrouter-env-vars
+    OPENCODE_PROVIDER_ID: ${{ secrets.EVMBENCH_LLM_PROVIDER }}
+    OPENCODE_AGENT_TIMEOUT_SECONDS: ${{ secrets.EVMBENCH_OPENROUTER_AGENT_TIMEOUT_SECONDS }}

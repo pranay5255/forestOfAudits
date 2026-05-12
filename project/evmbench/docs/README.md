@@ -9,6 +9,7 @@ here, then open the one guide that matches the task you are doing.
 | --- | --- |
 | [infrastructure-and-vllm.md](infrastructure-and-vllm.md) | Remote compute requirements, audit image naming, networking assumptions, and Modal vLLM endpoint setup/verification. |
 | [phase6-runs-and-data.md](phase6-runs-and-data.md) | Phase 6 debug ladders, mini-swe-agent and OpenCode vLLM runs, promotion gates, raw artifact preservation, and result inspection. |
+| [openai-gpt54-cli-audit-study.md](openai-gpt54-cli-audit-study.md) | Direct-OpenAI GPT-5.4 Codex CLI vs OpenCode results, audit folder structure, audit catalog, and longer-run commands. |
 | [nanoeval-system-and-containers.md](nanoeval-system-and-containers.md) | Mermaid diagrams for nanoeval scheduling, EVMBench nano tasks, local/Modal containers, retry behavior, and exploit-mode ploit/veto flow. |
 | [forest-trace-extraction.md](forest-trace-extraction.md) | Planned extractor contract for turning forest trajectories into validated dataset JSONL files. |
 | [exploit-benchmark-extension.md](exploit-benchmark-extension.md) | How exploit-mode audits work and how to add a small exploit benchmark in parity with classic EVMBench audits. |

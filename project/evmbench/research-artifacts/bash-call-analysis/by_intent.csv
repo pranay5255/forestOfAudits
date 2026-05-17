@@ -1,0 +1,12 @@
+intent_category,count
+code_or_file_inspection,751
+blockchain_rpc_probe,144
+file_or_repo_mutation,79
+code_search,69
+run_orchestration,53
+build_or_test,49
+other,34
+script_or_runtime,28
+version_control,18
+submission_output,16
+text_processing,3

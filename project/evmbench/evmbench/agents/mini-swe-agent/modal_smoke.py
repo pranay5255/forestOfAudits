@@ -2,7 +2,7 @@
 """Minimal mini-swe-agent + Modal smoke test.
 
 This is intentionally smaller than `modal_baseline.py`. It checks the scaled
-execution surface described in docs/infrastructure-and-vllm.md without requiring
+execution surface described in docs/infrastructure-vllm-modal.md without requiring
 an EVMBench audit image or an LLM API call:
 
 - start a Modal container through SwerexModalEnvironment

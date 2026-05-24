@@ -1,0 +1,19 @@
+{
+  "completion_marker": "Benchmark finalization marker, usually echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.",
+  "report_submission": "Writes, reads, or validates benchmark submission artifacts under submission/.",
+  "exploit_execution": "Runs exploit transactions/scripts, especially forge script --broadcast or cast send.",
+  "build_test": "Compiles or tests code, including forge test/build, hardhat tests, npm test, pytest.",
+  "onchain_state_query": "Inspects fork/on-chain state with cast call/storage/balance/code/logs or selector utilities.",
+  "file_write_edit": "Creates or edits files with redirection, heredocs, tee, apply_patch, cp/mv/rm, mkdir, chmod.",
+  "text_search": "Searches source/log text with rg, grep, ack, ag, or similar tools.",
+  "file_read_navigation": "Reads or lists files/directories with pwd, ls, cat, sed, find, head, tail, nl, wc, stat.",
+  "git_vcs": "Uses git or GitHub CLI.",
+  "dependency_install": "Installs or fetches project dependencies/packages.",
+  "runtime_script": "Runs ad-hoc interpreters or scripts such as python, node, jq, awk, bash/sh.",
+  "environment_process": "Inspects or changes runtime/container/process environment.",
+  "network_external": "Attempts external network/service access such as curl, wget, gh issue view.",
+  "structured_subagent": "OpenCode task/subagent tool invocation rather than a shell command.",
+  "shell_output_logging": "Prints headings, diagnostics, or progress text with echo/printf.",
+  "shell_control_flow": "Shell glue such as comments, conditionals, loops, function wrappers, true/false, and pure assignments.",
+  "other": "No specific category matched."
+}

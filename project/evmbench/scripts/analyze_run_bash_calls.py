@@ -1578,5 +1578,1317 @@ def main() -> None:
         print(f"Wrote {len(plots)} plots to {output_dir / 'plots'}")
 
 
+# ---------------------------------------------------------------------------
+# Compatibility analyzer
+#
+# The original research script above writes a richer notebook-oriented report.
+# The public artifact contract for the downloaded run corpus is narrower:
+# command_invocations.csv, command_segments.csv, per_run_category_summary.csv,
+# category_taxonomy.json, source_files.json, and report.md.  The implementation
+# below intentionally keeps that schema stable while adding coverage for all
+# trace roots used by the bash-command analysis refresh.
+
+REPO_ROOT = PROJECT_ROOT.parent.parent
+COMPAT_OUTPUT_DIR = REPO_ROOT / "evmbench_runs_download" / "bash_command_analysis"
+
+COMPAT_INVOCATION_FIELDS = [
+    "invocation_id",
+    "run_id",
+    "source_family",
+    "batch",
+    "agent",
+    "model",
+    "mode",
+    "benchmark",
+    "role",
+    "tool",
+    "is_bash",
+    "primary_category",
+    "categories",
+    "exit_code",
+    "status",
+    "workdir",
+    "description",
+    "inner_command",
+    "raw_command",
+    "source_path",
+    "source_line",
+    "source_format",
+]
+
+COMPAT_SEGMENT_FIELDS = [
+    "segment_id",
+    "invocation_id",
+    "run_id",
+    "source_family",
+    "agent",
+    "mode",
+    "benchmark",
+    "role",
+    "tool",
+    "is_bash",
+    "segment_position",
+    "primary_category",
+    "categories",
+    "first_token",
+    "segment",
+    "source_path",
+    "source_line",
+]
+
+COMPAT_RUN_SUMMARY_FIELDS = [
+    "run_id",
+    "source_family",
+    "agent",
+    "mode",
+    "benchmark",
+    "role",
+    "primary_category",
+    "count",
+]
+
+COMPAT_TAXONOMY = {
+    "completion_marker": "Benchmark finalization marker, usually echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.",
+    "report_submission": "Writes, reads, or validates benchmark submission artifacts under submission/.",
+    "exploit_execution": "Runs exploit transactions/scripts, especially forge script --broadcast or cast send.",
+    "build_test": "Compiles or tests code, including forge test/build, hardhat tests, npm test, pytest.",
+    "onchain_state_query": "Inspects fork/on-chain state with cast call/storage/balance/code/logs or selector utilities.",
+    "file_write_edit": "Creates or edits files with redirection, heredocs, tee, apply_patch, cp/mv/rm, mkdir, chmod.",
+    "text_search": "Searches source/log text with rg, grep, ack, ag, or similar tools.",
+    "file_read_navigation": "Reads or lists files/directories with pwd, ls, cat, sed, find, head, tail, nl, wc, stat.",
+    "git_vcs": "Uses git or GitHub CLI.",
+    "dependency_install": "Installs or fetches project dependencies/packages.",
+    "runtime_script": "Runs ad-hoc interpreters or scripts such as python, node, jq, awk, bash/sh.",
+    "environment_process": "Inspects or changes runtime/container/process environment.",
+    "network_external": "Attempts external network/service access such as curl, wget, gh issue view.",
+    "structured_subagent": "OpenCode task/subagent tool invocation rather than a shell command.",
+    "shell_output_logging": "Prints headings, diagnostics, or progress text with echo/printf.",
+    "shell_control_flow": "Shell glue such as comments, conditionals, loops, function wrappers, true/false, and pure assignments.",
+    "other": "No specific category matched.",
+}
+
+COMPAT_CATEGORY_PRIORITY = [
+    "completion_marker",
+    "report_submission",
+    "exploit_execution",
+    "build_test",
+    "onchain_state_query",
+    "file_write_edit",
+    "text_search",
+    "file_read_navigation",
+    "git_vcs",
+    "dependency_install",
+    "runtime_script",
+    "environment_process",
+    "network_external",
+    "structured_subagent",
+    "shell_output_logging",
+    "shell_control_flow",
+    "other",
+]
+
+COMPAT_SOURCE_PRIORITIES = {
+    "evmbench_runs_download": 0,
+    "evmbench_native_runs": 1,
+    "exploit_results": 2,
+    "exploit_results_v3": 3,
+    "exploit_results_live_v3": 4,
+    "project_evmbench_runs": 5,
+}
+
+COMPAT_DEFAULT_SOURCES = [
+    ("evmbench_runs_download", REPO_ROOT / "evmbench_runs_download"),
+    ("project_evmbench_runs", PROJECT_ROOT / "runs"),
+    ("exploit_results", REPO_ROOT / "exploit_results"),
+    ("exploit_results_v3", REPO_ROOT / "exploit_results_v3"),
+    ("exploit_results_live_v3", REPO_ROOT / "exploit_results_live_v3"),
+    ("evmbench_native_runs", REPO_ROOT / "evmBench-frontier-evals" / "project" / "evmbench" / "runs"),
+]
+
+COMPAT_RUN_GROUP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T[^/]+_run-group_[^/]+")
+COMPAT_RUN_KEY_RE = re.compile(
+    r"(?P<agent>codex|opencode|mini-swe-agent|modal-forest|modal|yudai-minisweagent)"
+    r"--(?P<model>.+?)--(?P<mode>detect|patch|exploit)--(?P<benchmark>\d{4}-\d{2}-[^/]+)"
+)
+COMPAT_AUDIT_INSTANCE_RE = re.compile(r"(?P<benchmark>\d{4}-\d{2}-[A-Za-z0-9-]+)_[0-9a-fA-F-]{8,}")
+COMPAT_EXPLOIT_STEM_RE = re.compile(r"benchmark_\d+_\d+_\d+_1_(?P<benchmark>.+)")
+COMPAT_BASH_FENCE_RE = re.compile(
+    r"```(?P<lang>bash|sh|mswea_bash_command)\s*\n(?P<body>.*?)(?:\n)?```",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class CompatSourceSpec:
+    family: str
+    root: Path
+
+
+@dataclass(frozen=True)
+class CompatSourceFile:
+    source_family: str
+    root: Path
+    path: Path
+    rel_path: str
+    rel_to_source: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class CompatMetadata:
+    run_id: str
+    source_family: str
+    batch: str
+    agent: str
+    model: str
+    mode: str
+    benchmark: str
+    role: str
+    run_group: str
+    run_instance: str
+
+
+@dataclass
+class CompatInvocation:
+    logical_key: str
+    invocation_id: int
+    run_id: str
+    source_family: str
+    batch: str
+    agent: str
+    model: str
+    mode: str
+    benchmark: str
+    role: str
+    tool: str
+    is_bash: bool
+    primary_category: str
+    categories: str
+    exit_code: str
+    status: str
+    workdir: str
+    description: str
+    inner_command: str
+    raw_command: str
+    source_path: str
+    source_line: str
+    source_format: str
+
+
+def compat_relpath(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def compat_parse_source(value: str) -> CompatSourceSpec:
+    if "=" in value:
+        family, raw_path = value.split("=", 1)
+    else:
+        raw_path = value
+        family = Path(value).name.replace("-", "_")
+    if not family:
+        raise ValueError(f"invalid source label in {value!r}")
+    return CompatSourceSpec(family=family, root=Path(raw_path))
+
+
+def compat_default_sources() -> list[CompatSourceSpec]:
+    return [CompatSourceSpec(family=family, root=root) for family, root in COMPAT_DEFAULT_SOURCES]
+
+
+def compat_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def compat_is_candidate(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.name in {"codex-run.jsonl", "opencode-run.jsonl"}:
+        return True
+    if path.name.endswith(".traj.json"):
+        return True
+    if path.suffix == ".json":
+        return True
+    return False
+
+
+def compat_discover_source_files(
+    sources: list[CompatSourceSpec],
+) -> tuple[list[CompatSourceFile], dict[str, Any]]:
+    stats: dict[str, Any] = {
+        "candidate_files": 0,
+        "unique_files": 0,
+        "skipped_duplicate_files": 0,
+        "missing_sources": [],
+        "candidate_by_source_family": Counter(),
+        "unique_by_source_family": Counter(),
+        "duplicate_by_source_family": Counter(),
+    }
+    candidates_by_hash: dict[str, list[CompatSourceFile]] = {}
+    for source in sources:
+        root = source.root.resolve()
+        if not root.exists():
+            stats["missing_sources"].append(f"{source.family}={root}")
+            continue
+        for path in sorted(root.rglob("*")):
+            if not compat_is_candidate(path):
+                continue
+            try:
+                rel_to_source = str(path.relative_to(root))
+            except ValueError:
+                rel_to_source = str(path)
+            record = CompatSourceFile(
+                source_family=source.family,
+                root=root,
+                path=path,
+                rel_path=compat_relpath(path),
+                rel_to_source=rel_to_source,
+                sha256=compat_file_sha256(path),
+            )
+            stats["candidate_files"] += 1
+            stats["candidate_by_source_family"][source.family] += 1
+            candidates_by_hash.setdefault(record.sha256, []).append(record)
+
+    selected: list[CompatSourceFile] = []
+    for records in candidates_by_hash.values():
+        records = sorted(
+            records,
+            key=lambda item: (
+                COMPAT_SOURCE_PRIORITIES.get(item.source_family, 100),
+                len(item.rel_path),
+                item.rel_path,
+            ),
+        )
+        selected.append(records[0])
+        stats["unique_by_source_family"][records[0].source_family] += 1
+        for duplicate in records[1:]:
+            stats["skipped_duplicate_files"] += 1
+            stats["duplicate_by_source_family"][duplicate.source_family] += 1
+
+    selected.sort(key=lambda item: item.rel_path)
+    stats["unique_files"] = len(selected)
+    return selected, stats
+
+
+def compat_path_parts(source_file: CompatSourceFile) -> tuple[str, ...]:
+    return Path(source_file.rel_to_source).parts
+
+
+def compat_infer_batch(source_file: CompatSourceFile) -> str:
+    if source_file.source_family.startswith("exploit_results"):
+        return ""
+    parts = compat_path_parts(source_file)
+    if "evmbench_runs" in parts:
+        idx = parts.index("evmbench_runs")
+        return "/".join(parts[:idx])
+    if len(parts) >= 2 and parts[0] in {"openrouter-v1", "rca", "phase6", "vllm-smoke"}:
+        return "/".join(parts[:2])
+    return ""
+
+
+def compat_infer_run_group_and_instance(source_file: CompatSourceFile) -> tuple[str, str]:
+    parts = compat_path_parts(source_file)
+    for index, part in enumerate(parts):
+        if COMPAT_RUN_GROUP_RE.fullmatch(part):
+            run_instance = parts[index + 1] if index + 1 < len(parts) else part
+            return part, run_instance
+    stem = source_file.path.name
+    if stem.endswith(".traj.json"):
+        stem = stem[: -len(".traj.json")]
+    else:
+        stem = source_file.path.stem
+    if source_file.source_family.startswith("exploit_results"):
+        return "", stem
+    return "", str(Path(source_file.rel_to_source).parent)
+
+
+def compat_infer_role(source_file: CompatSourceFile) -> str:
+    parts = compat_path_parts(source_file)
+    if "forest" not in parts:
+        return ""
+    idx = parts.index("forest")
+    if idx + 1 >= len(parts):
+        return ""
+    first = parts[idx + 1]
+    if first.endswith(".traj.json"):
+        return first[: -len(".traj.json")]
+    if idx + 2 < len(parts):
+        second = parts[idx + 2]
+        if second.endswith(".traj.json"):
+            second = second[: -len(".traj.json")]
+        return f"{first}/{second}"
+    return first
+
+
+def compat_payload_model(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else payload
+    for key in ("model", "model_name", "model_id"):
+        value = info.get(key)
+        if isinstance(value, str):
+            return value
+    config = info.get("config") if isinstance(info.get("config"), dict) else {}
+    model_config = config.get("model") if isinstance(config.get("model"), dict) else {}
+    value = model_config.get("model_name")
+    return value if isinstance(value, str) else ""
+
+
+def compat_infer_metadata(
+    source_file: CompatSourceFile,
+    payload: dict[str, Any] | None = None,
+) -> CompatMetadata:
+    rel_text = source_file.rel_path
+    parts = compat_path_parts(source_file)
+    batch = compat_infer_batch(source_file)
+    run_group, run_instance = compat_infer_run_group_and_instance(source_file)
+
+    agent = ""
+    model = ""
+    mode = ""
+    benchmark = ""
+
+    run_key_match = COMPAT_RUN_KEY_RE.search(rel_text)
+    if run_key_match:
+        agent = run_key_match.group("agent")
+        model = run_key_match.group("model")
+        mode = run_key_match.group("mode")
+        benchmark = run_key_match.group("benchmark")
+
+    if not agent:
+        if "/logs/codex/" in rel_text:
+            agent = "codex"
+        elif "/logs/opencode/" in rel_text:
+            agent = "opencode"
+        elif "/logs/forest/" in rel_text or "/modal/logs/forest/" in rel_text:
+            agent = "mini-swe-agent-forest"
+        elif source_file.path.name == "yudai-minisweagent.traj.json":
+            agent = "yudai-minisweagent"
+        elif source_file.source_family.startswith("exploit_results"):
+            agent = "mini-swe-agent"
+
+    if not mode:
+        mode_match = MODE_RE.search(rel_text)
+        if mode_match:
+            mode = mode_match.group("mode")
+    if not mode and source_file.source_family.startswith("exploit_results"):
+        mode = "exploit"
+
+    if not benchmark:
+        for part in reversed(parts):
+            audit_match = COMPAT_AUDIT_INSTANCE_RE.match(part)
+            if audit_match:
+                benchmark = audit_match.group("benchmark")
+                break
+    if not benchmark and source_file.source_family.startswith("exploit_results"):
+        stem = source_file.path.name
+        if stem.endswith(".traj.json"):
+            stem = stem[: -len(".traj.json")]
+        exploit_match = COMPAT_EXPLOIT_STEM_RE.fullmatch(stem)
+        benchmark = exploit_match.group("benchmark") if exploit_match else stem
+
+    if not model and agent in {"codex", "opencode"}:
+        model = compat_payload_model(payload)
+
+    role = compat_infer_role(source_file)
+    run_id_parts = [source_file.source_family]
+    if batch:
+        run_id_parts.append(batch)
+    run_id_parts.extend(
+        [
+            agent,
+            model,
+            mode,
+            benchmark,
+        ]
+    )
+    if run_group:
+        run_id_parts.append(run_group)
+    if run_instance:
+        run_id_parts.append(run_instance)
+    run_id = "|".join(part for part in run_id_parts if part != "")
+    return CompatMetadata(
+        run_id=run_id,
+        source_family=source_file.source_family,
+        batch=batch,
+        agent=agent,
+        model=model,
+        mode=mode,
+        benchmark=benchmark,
+        role=role,
+        run_group=run_group,
+        run_instance=run_instance,
+    )
+
+
+def compat_observation_info(message: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(message, dict):
+        return {"exit_code": "", "status": ""}
+    content = message.get("content")
+    if not isinstance(content, str):
+        content = ""
+    returncode_match = re.search(r"<returncode>(.*?)</returncode>", content, flags=re.DOTALL)
+    timed_out = bool(re.search(r"\b(time(?:d)? out|timeout)\b", content, flags=re.IGNORECASE))
+    if returncode_match:
+        return {"exit_code": returncode_match.group(1).strip(), "status": "completed"}
+    if timed_out:
+        return {"exit_code": "", "status": "timeout"}
+    extra = message.get("extra") if isinstance(message.get("extra"), dict) else {}
+    if "returncode" in extra:
+        return {"exit_code": str(extra.get("returncode", "")), "status": "completed"}
+    return {"exit_code": "", "status": ""}
+
+
+def compat_next_observation(messages: list[Any], index: int) -> dict[str, str]:
+    for next_message in messages[index + 1 : index + 4]:
+        if not isinstance(next_message, dict):
+            continue
+        if next_message.get("role") in {"user", "tool"}:
+            return compat_observation_info(next_message)
+    return {"exit_code": "", "status": ""}
+
+
+def compat_strip_heredocs_for_splitting(command: str) -> str:
+    lines = command.splitlines()
+    if not lines:
+        return command
+    result: list[str] = []
+    delimiter: str | None = None
+    marker_re = re.compile(r"<<-?\s*['\"]?([A-Za-z0-9_./-]+)['\"]?")
+    for line in lines:
+        if delimiter is not None:
+            if line.strip() == delimiter:
+                delimiter = None
+            continue
+        result.append(line)
+        match = marker_re.search(line)
+        if match:
+            delimiter = match.group(1)
+    return "\n".join(result)
+
+
+def compat_shell_tokens(command: str) -> list[str]:
+    stripped = compat_strip_heredocs_for_splitting(command).replace("\n", " ; ")
+    try:
+        lexer = shlex.shlex(stripped, posix=True, punctuation_chars="|&;()<>")
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return stripped.split()
+
+
+def compat_split_shell_segments(command: str) -> list[str]:
+    tokens = compat_shell_tokens(command)
+    segments: list[list[str]] = []
+    current: list[str] = []
+    separators = {";", "&&", "||", "|", "(", ")"}
+    for token in tokens:
+        if token in separators:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    rendered = [" ".join(segment).strip() for segment in segments]
+    return [segment for segment in rendered if segment]
+
+
+def compat_first_token(segment: str) -> str:
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    index = 0
+    while index < len(tokens) and is_env_assignment(tokens[index]):
+        index += 1
+    while index < len(tokens) and tokens[index] in {"sudo", "env", "command", "time", "timeout", "nice"}:
+        index += 1
+        while index < len(tokens) and (tokens[index].startswith("-") or is_env_assignment(tokens[index])):
+            index += 1
+    if index >= len(tokens):
+        return ""
+    return Path(tokens[index]).name
+
+
+def compat_category_for_segment(segment: str, tool: str = "bash", is_bash: bool = True) -> str:
+    lowered = segment.lower().strip()
+    first = compat_first_token(segment)
+    if not is_bash:
+        if tool in {"read", "glob", "list"}:
+            return "file_read_navigation"
+        if tool in {"grep", "search"}:
+            return "text_search"
+        if tool in {"write", "edit", "apply_patch"}:
+            return "file_write_edit"
+        if tool == "task":
+            return "structured_subagent"
+        return "structured_subagent"
+    if not lowered:
+        return "shell_control_flow"
+    if lowered.startswith("#"):
+        return "shell_control_flow"
+    if "complete_task_and_submit_final_output" in lowered:
+        return "completion_marker"
+    if re.search(r"\bsubmission/(audit|report)\.md\b|/submission/(audit|report)\.md\b", lowered):
+        return "report_submission"
+    if first == "cast":
+        if re.search(r"\bcast\s+send\b", lowered):
+            return "exploit_execution"
+        return "onchain_state_query"
+    if first in {"anvil", "chisel"}:
+        return "onchain_state_query"
+    if first == "forge" and re.search(r"\bscript\b", lowered) and (
+        "--broadcast" in lowered or "script/harness" in lowered
+    ):
+        return "exploit_execution"
+    if re.search(r"\b(forge|hardhat|pytest|cargo|go|make|cmake|ninja)\s+(test|build|compile|check|script)\b", lowered):
+        return "build_test"
+    if re.search(r"\b(npm|pnpm|yarn|bun)\s+(test|run|build|compile)\b", lowered):
+        return "build_test"
+    if (
+        "apply_patch" in lowered
+        or re.search(r"(^|\s)(>|>>|2>|2>>|&>)", segment)
+        or re.search(r"<<-?\s*['\"]?[A-Za-z0-9_./-]+", segment)
+        or first in WRITE_TOOLS
+        or re.search(r"\b(sed|perl)\b.*\s-i(\s|$)", lowered)
+        or re.search(r"\bgit\s+(add|commit|checkout|switch|merge|pull|push|reset|restore|rm|mv|clean)\b", lowered)
+    ):
+        return "file_write_edit"
+    if first in SEARCH_TOOLS:
+        return "text_search"
+    if first in READ_TOOLS or first in LIST_TOOLS:
+        return "file_read_navigation"
+    if first in GIT_TOOLS:
+        return "git_vcs"
+    if re.search(r"\b(npm|npx|pnpm|yarn|pip|pip3|uv|poetry|bun)\s+(install|add|remove|sync|i)\b", lowered):
+        return "dependency_install"
+    if first in {"curl", "wget", "ssh", "scp", "nc", "telnet"}:
+        return "network_external"
+    if first in {"docker", "ps", "kill", "pkill", "pgrep", "env", "printenv", "export", "set", "unset", "which", "whereis", "uname", "date", "sleep", "jobs", "tmux"}:
+        return "environment_process"
+    if first in {"echo", "printf"}:
+        return "shell_output_logging"
+    if first in {"cd", "true", "false", "test", "[", "if", "then", "else", "fi", "for", "while", "do", "done", "case", "esac", "function"}:
+        return "shell_control_flow"
+    if first in LANGUAGE_TOOLS or first in TEXT_PROCESS_TOOLS:
+        return "runtime_script"
+    return "other"
+
+
+def compat_categories_for_command(command: str, tool: str, is_bash: bool) -> tuple[str, str]:
+    if is_bash:
+        segments = compat_split_shell_segments(command)
+        if not segments and command.strip():
+            segments = [command.strip()]
+        categories = [compat_category_for_segment(segment, tool, True) for segment in segments]
+    else:
+        categories = [compat_category_for_segment(command, tool, False)]
+    if not categories:
+        categories = ["other"]
+    seen: list[str] = []
+    for category in categories:
+        if category not in seen:
+            seen.append(category)
+    primary = min(seen, key=lambda category: COMPAT_CATEGORY_PRIORITY.index(category))
+    return primary, "|".join(seen)
+
+
+def compat_normalize_invocation(
+    *,
+    source_file: CompatSourceFile,
+    source_format: str,
+    source_line: int | str,
+    command: Any,
+    tool: str = "bash",
+    is_bash: bool = True,
+    call_id: str = "",
+    status: Any = "",
+    exit_code: Any = "",
+    workdir: Any = "",
+    description: str = "",
+    payload: dict[str, Any] | None = None,
+    key_hint: str = "",
+) -> CompatInvocation:
+    metadata = compat_infer_metadata(source_file, payload)
+    raw_command = redact_command(shell_join(command))
+    inner_command = redact_command(unwrap_bash_lc(raw_command)) if is_bash else raw_command
+    primary_category, categories = compat_categories_for_command(inner_command, tool, is_bash)
+    logical_basis = "|".join(
+        [
+            metadata.run_id,
+            source_format,
+            str(call_id or source_line),
+            key_hint,
+            tool,
+            inner_command,
+        ]
+    )
+    logical_key = hashlib.sha256(logical_basis.encode("utf-8", "replace")).hexdigest()
+    return CompatInvocation(
+        logical_key=logical_key,
+        invocation_id=0,
+        run_id=metadata.run_id,
+        source_family=metadata.source_family,
+        batch=metadata.batch,
+        agent=metadata.agent,
+        model=metadata.model,
+        mode=metadata.mode,
+        benchmark=metadata.benchmark,
+        role=metadata.role,
+        tool=tool,
+        is_bash=is_bash,
+        primary_category=primary_category,
+        categories=categories,
+        exit_code=str(exit_code if exit_code is not None else ""),
+        status=str(status or ""),
+        workdir=str(workdir or ""),
+        description=description,
+        inner_command=inner_command,
+        raw_command=raw_command,
+        source_path=source_file.rel_path,
+        source_line=str(source_line),
+        source_format=source_format,
+    )
+
+
+def compat_extract_traj(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    payload = read_json(source_file.path)
+    if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
+        return []
+    messages = payload["messages"]
+    payload_metadata = payload.get("info") if isinstance(payload.get("info"), dict) else payload
+    records: list[CompatInvocation] = []
+
+    tool_results: dict[str, dict[str, str]] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        tool_call_id = str(message.get("tool_call_id") or "")
+        if tool_call_id:
+            tool_results[tool_call_id] = compat_observation_info(message)
+
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        observation = compat_next_observation(messages, index)
+        actions = message.get("actions")
+        if isinstance(actions, list) and actions:
+            for action_index, action in enumerate(actions):
+                if not isinstance(action, dict) or action.get("tool") != "bash":
+                    continue
+                command = action.get("command", action.get("action"))
+                if command is None:
+                    continue
+                records.append(
+                    compat_normalize_invocation(
+                        source_file=source_file,
+                        source_format="traj-action",
+                        source_line=index,
+                        command=command,
+                        call_id=f"message-{index}-action-{action_index}",
+                        status=observation.get("status", ""),
+                        exit_code=observation.get("exit_code", ""),
+                        payload=payload_metadata,
+                    )
+                )
+            continue
+
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            for call_index, tool_call in enumerate(tool_calls):
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict) or function.get("name") != "bash":
+                    continue
+                arguments = safe_json_loads(function.get("arguments", "{}"))
+                if not isinstance(arguments, dict) or "command" not in arguments:
+                    continue
+                call_id = str(tool_call.get("id") or f"message-{index}-tool-{call_index}")
+                result = tool_results.get(call_id, observation)
+                records.append(
+                    compat_normalize_invocation(
+                        source_file=source_file,
+                        source_format="traj-tool-call",
+                        source_line=index,
+                        command=arguments["command"],
+                        call_id=call_id,
+                        status=result.get("status", ""),
+                        exit_code=result.get("exit_code", ""),
+                        payload=payload_metadata,
+                    )
+                )
+            continue
+
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        for block_index, match in enumerate(COMPAT_BASH_FENCE_RE.finditer(content)):
+            command = match.group("body").strip("\n")
+            if not command.strip():
+                continue
+            records.append(
+                compat_normalize_invocation(
+                    source_file=source_file,
+                    source_format="traj-bash-code-block",
+                    source_line=index,
+                    command=command,
+                    call_id=f"message-{index}-block-{block_index}",
+                    status=observation.get("status", ""),
+                    exit_code=observation.get("exit_code", ""),
+                    payload=payload_metadata,
+                )
+            )
+    return records
+
+
+def compat_extract_codex_jsonl(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    if source_file.path.name != "codex-run.jsonl":
+        return []
+    by_id: dict[str, tuple[int, CompatInvocation]] = {}
+    for line_no, payload in iter_jsonl(source_file.path):
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        if not command:
+            continue
+        item_id = str(item.get("id") or f"line-{line_no}")
+        record = compat_normalize_invocation(
+            source_file=source_file,
+            source_format="codex-run-jsonl",
+            source_line=line_no,
+            command=command,
+            call_id=item_id,
+            status=item.get("status", ""),
+            exit_code=item.get("exit_code", ""),
+            payload=payload,
+            key_hint=item_id,
+        )
+        old = by_id.get(item_id)
+        if old is None or (old[1].status != "completed" and record.status == "completed"):
+            by_id[item_id] = (line_no, record)
+    return [record for _, record in sorted(by_id.values(), key=lambda item: item[0])]
+
+
+def compat_opencode_structured_command(tool: str, state_input: dict[str, Any]) -> tuple[str, str]:
+    if tool == "read":
+        value = state_input.get("filePath") or state_input.get("path") or ""
+        return f"read {value}".strip(), ""
+    if tool == "glob":
+        path = state_input.get("path") or ""
+        pattern = state_input.get("pattern") or ""
+        return f"glob {path} {pattern}".strip(), ""
+    if tool in {"grep", "search"}:
+        pattern = state_input.get("pattern") or state_input.get("query") or ""
+        path = state_input.get("path") or state_input.get("include") or ""
+        return f"{tool} {pattern} {path}".strip(), ""
+    if tool == "task":
+        description = str(state_input.get("description") or "")
+        return f"task {description}".strip(), description
+    if tool == "apply_patch":
+        return "apply_patch", ""
+    return tool, ""
+
+
+def compat_extract_opencode_payload(
+    source_file: CompatSourceFile,
+    payload: dict[str, Any],
+    source_format: str,
+    source_line: int | str,
+) -> CompatInvocation | None:
+    part = payload.get("part") if "part" in payload else payload
+    if not isinstance(part, dict) or part.get("type") != "tool":
+        return None
+    tool = str(part.get("tool") or "")
+    if not tool:
+        return None
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    state_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    call_id = str(part.get("callID") or part.get("id") or f"line-{source_line}")
+    if tool == "bash":
+        command = state_input.get("command")
+        if not command:
+            return None
+        return compat_normalize_invocation(
+            source_file=source_file,
+            source_format=source_format,
+            source_line=source_line,
+            command=command,
+            call_id=call_id,
+            status=state.get("status", ""),
+            exit_code=metadata.get("exit", ""),
+            workdir=state_input.get("workdir", ""),
+            payload=payload,
+            key_hint=call_id,
+        )
+    command, description = compat_opencode_structured_command(tool, state_input)
+    return compat_normalize_invocation(
+        source_file=source_file,
+        source_format=source_format,
+        source_line=source_line,
+        command=command,
+        tool=tool,
+        is_bash=False,
+        call_id=call_id,
+        status=state.get("status", ""),
+        exit_code=metadata.get("exit", ""),
+        description=description,
+        payload=payload,
+        key_hint=call_id,
+    )
+
+
+def compat_extract_opencode_jsonl(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    if source_file.path.name != "opencode-run.jsonl":
+        return []
+    records: list[CompatInvocation] = []
+    for line_no, payload in iter_jsonl(source_file.path):
+        record = compat_extract_opencode_payload(source_file, payload, "opencode-run-jsonl", line_no)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def compat_extract_opencode_part_json(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    if source_file.path.suffix != ".json" or "/storage/part/" not in source_file.rel_path:
+        return []
+    payload = read_json(source_file.path)
+    if not isinstance(payload, dict):
+        return []
+    record = compat_extract_opencode_payload(source_file, payload, "opencode-state-part-json", 1)
+    return [record] if record is not None else []
+
+
+def compat_extract_runner_commands(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    if source_file.path.suffix != ".json" or source_file.path.name.endswith(".traj.json"):
+        return []
+    if "/storage/part/" in source_file.rel_path:
+        return []
+    if not (
+        source_file.path.name in {"phase6-results.json", "openrouter-v1-results.json", "modal-runner-command.json"}
+        or source_file.path.name.endswith("-results.json")
+        or "_task_results" in source_file.path.parts
+    ):
+        return []
+    payload = read_json(source_file.path)
+    if not isinstance(payload, dict):
+        return []
+    records: list[CompatInvocation] = []
+    seen: set[str] = set()
+
+    def maybe_record(node: dict[str, Any], trail: str) -> None:
+        command = node.get("command")
+        if isinstance(command, list):
+            if not command:
+                return
+        elif isinstance(command, str):
+            if not command.strip():
+                return
+        else:
+            return
+        marker = "|".join(
+            [
+                shell_join(command),
+                str(node.get("run_key") or node.get("agent_id") or ""),
+                str(node.get("started_at") or ""),
+                str(node.get("returncode") if node.get("returncode") is not None else ""),
+            ]
+        )
+        if marker in seen:
+            return
+        seen.add(marker)
+        records.append(
+            compat_normalize_invocation(
+                source_file=source_file,
+                source_format="runner-metadata-json",
+                source_line=trail or 1,
+                command=command,
+                call_id=str(node.get("run_key") or node.get("agent_id") or trail),
+                status="completed" if node.get("returncode") == 0 else str(node.get("status") or ""),
+                exit_code=node.get("returncode", ""),
+                payload=node,
+                key_hint=trail,
+            )
+        )
+
+    def visit(node: Any, trail: str = "") -> None:
+        if isinstance(node, dict):
+            if "command" in node and ("returncode" in node or "started_at" in node or source_file.path.name == "modal-runner-command.json"):
+                maybe_record(node, trail)
+            for key, value in node.items():
+                if key in {"env", "files", "aggregate"}:
+                    continue
+                visit(value, f"{trail}.{key}" if trail else key)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                visit(item, f"{trail}[{index}]")
+
+    visit(payload)
+    return records
+
+
+def compat_extract_source_file(source_file: CompatSourceFile) -> list[CompatInvocation]:
+    records: list[CompatInvocation] = []
+    records.extend(compat_extract_traj(source_file))
+    records.extend(compat_extract_codex_jsonl(source_file))
+    records.extend(compat_extract_opencode_jsonl(source_file))
+    records.extend(compat_extract_opencode_part_json(source_file))
+    records.extend(compat_extract_runner_commands(source_file))
+    return records
+
+
+def compat_extract_calls(
+    sources: list[CompatSourceSpec],
+) -> tuple[list[CompatInvocation], dict[str, Any], list[str]]:
+    source_files, stats = compat_discover_source_files(sources)
+    stats["files_with_extracted_invocations"] = 0
+    stats["extracted_by_source_family"] = Counter()
+    stats["source_format"] = Counter()
+    stats["deduped_logical_invocations"] = 0
+    calls_by_key: dict[str, CompatInvocation] = {}
+    source_paths_with_kept_calls: set[str] = set()
+    for source_file in source_files:
+        extracted = compat_extract_source_file(source_file)
+        if extracted:
+            stats["files_with_extracted_invocations"] += 1
+        for record in extracted:
+            stats["extracted_by_source_family"][source_file.source_family] += 1
+            stats["source_format"][record.source_format] += 1
+            existing = calls_by_key.get(record.logical_key)
+            if existing is not None:
+                stats["deduped_logical_invocations"] += 1
+                if (
+                    existing.source_format == "opencode-state-part-json"
+                    and record.source_format == "opencode-run-jsonl"
+                ):
+                    calls_by_key[record.logical_key] = record
+                continue
+            calls_by_key[record.logical_key] = record
+    calls = sorted(
+        calls_by_key.values(),
+        key=lambda item: (
+            item.source_family,
+            item.source_path,
+            int(item.source_line) if str(item.source_line).isdigit() else 10**9,
+            item.source_line,
+            item.tool,
+            item.inner_command,
+        ),
+    )
+    for invocation_id, call in enumerate(calls, 1):
+        call.invocation_id = invocation_id
+        source_paths_with_kept_calls.add(call.source_path)
+    source_files_json = sorted(source_paths_with_kept_calls)
+    return calls, stats, source_files_json
+
+
+def compat_invocation_row(call: CompatInvocation) -> dict[str, Any]:
+    return {
+        "invocation_id": call.invocation_id,
+        "run_id": call.run_id,
+        "source_family": call.source_family,
+        "batch": call.batch,
+        "agent": call.agent,
+        "model": call.model,
+        "mode": call.mode,
+        "benchmark": call.benchmark,
+        "role": call.role,
+        "tool": call.tool,
+        "is_bash": str(call.is_bash),
+        "primary_category": call.primary_category,
+        "categories": call.categories,
+        "exit_code": call.exit_code,
+        "status": call.status,
+        "workdir": call.workdir,
+        "description": call.description,
+        "inner_command": call.inner_command,
+        "raw_command": call.raw_command,
+        "source_path": call.source_path,
+        "source_line": call.source_line,
+        "source_format": call.source_format,
+    }
+
+
+def compat_segment_rows(calls: list[CompatInvocation]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    segment_id = 1
+    for call in calls:
+        if call.is_bash:
+            segments = compat_split_shell_segments(call.inner_command)
+            if not segments and call.inner_command.strip():
+                segments = [call.inner_command.strip()]
+        else:
+            segments = [call.inner_command]
+        for position, segment in enumerate(segments, 1):
+            category = compat_category_for_segment(segment, call.tool, call.is_bash)
+            rows.append(
+                {
+                    "segment_id": segment_id,
+                    "invocation_id": call.invocation_id,
+                    "run_id": call.run_id,
+                    "source_family": call.source_family,
+                    "agent": call.agent,
+                    "mode": call.mode,
+                    "benchmark": call.benchmark,
+                    "role": call.role,
+                    "tool": call.tool,
+                    "is_bash": str(call.is_bash),
+                    "segment_position": position,
+                    "primary_category": category,
+                    "categories": category,
+                    "first_token": compat_first_token(segment) if call.is_bash else call.tool,
+                    "segment": segment,
+                    "source_path": call.source_path,
+                    "source_line": call.source_line,
+                }
+            )
+            segment_id += 1
+    return rows
+
+
+def compat_per_run_rows(calls: list[CompatInvocation]) -> list[dict[str, Any]]:
+    counter = Counter(
+        (
+            call.run_id,
+            call.source_family,
+            call.agent,
+            call.mode,
+            call.benchmark,
+            call.role,
+            call.primary_category,
+        )
+        for call in calls
+    )
+    rows: list[dict[str, Any]] = []
+    for key, count in sorted(counter.items(), key=lambda item: (item[0][0], item[0][6])):
+        rows.append(
+            {
+                "run_id": key[0],
+                "source_family": key[1],
+                "agent": key[2],
+                "mode": key[3],
+                "benchmark": key[4],
+                "role": key[5],
+                "primary_category": key[6],
+                "count": count,
+            }
+        )
+    return rows
+
+
+def compat_write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def compat_markdown_table(rows: list[dict[str, Any]], columns: list[str], limit: int = 20) -> str:
+    if not rows:
+        return ""
+    selected = rows[:limit]
+    header = "| " + " | ".join(columns) + " |"
+    sep = "| " + " | ".join("---" for _ in columns) + " |"
+    body = [
+        "| " + " | ".join(str(row.get(column, "")).replace("|", "\\|") for column in columns) + " |"
+        for row in selected
+    ]
+    return "\n".join([header, sep, *body])
+
+
+def compat_counter_rows(counter: Counter[Any], column: str) -> list[dict[str, Any]]:
+    return [{column: key, "count": value} for key, value in counter.most_common()]
+
+
+def compat_generation_counter_table(counter: Counter[str]) -> str:
+    rows = [{"source_family": key, "count": value} for key, value in counter.most_common()]
+    return compat_markdown_table(rows, ["source_family", "count"], limit=50)
+
+
+def compat_write_report(
+    output_dir: Path,
+    calls: list[CompatInvocation],
+    segment_rows: list[dict[str, Any]],
+    source_files_json: list[str],
+    stats: dict[str, Any],
+) -> Path:
+    bash_calls = sum(1 for call in calls if call.is_bash)
+    nonbash = len(calls) - bash_calls
+    run_count = len({call.run_id for call in calls})
+    by_segment_category = compat_counter_rows(Counter(row["primary_category"] for row in segment_rows), "primary_category")
+    by_invocation_category = compat_counter_rows(Counter(call.primary_category for call in calls), "primary_category")
+    by_agent_mode_category = [
+        {"agent": agent, "mode": mode, "primary_category": category, "count": count}
+        for (agent, mode, category), count in Counter(
+            (call.agent, call.mode, call.primary_category) for call in calls
+        ).most_common(40)
+    ]
+    by_source_family = compat_counter_rows(Counter(call.source_family for call in calls), "source_family")
+    by_source_format = compat_counter_rows(Counter(call.source_format for call in calls), "source_format")
+    top_run_category = [
+        {
+            "source_family": source_family,
+            "agent": agent,
+            "mode": mode,
+            "benchmark": benchmark,
+            "primary_category": category,
+            "count": count,
+        }
+        for (source_family, agent, mode, benchmark, category), count in Counter(
+            (call.source_family, call.agent, call.mode, call.benchmark, call.primary_category)
+            for call in calls
+        ).most_common(40)
+    ]
+    nonzero_examples = [
+        {
+            "agent": call.agent,
+            "mode": call.mode,
+            "benchmark": call.benchmark,
+            "primary_category": call.primary_category,
+            "exit_code": call.exit_code,
+            "inner_command": call.inner_command[:120],
+            "source_path": call.source_path,
+        }
+        for call in calls
+        if call.exit_code not in {"", "0"}
+    ][:20]
+
+    report = f"""# Agent Bash Command Analysis
+## Scope
+- Trace files scanned: {len(source_files_json)}
+- Total extracted invocations/tools: {len(calls)}
+- Actual bash/shell invocations: {bash_calls}
+- Structured OpenCode non-bash tool invocations: {nonbash}
+- Command segments after splitting compound commands: {len(segment_rows)}
+- Distinct runs with at least one extracted invocation: {run_count}
+
+Generated files:
+- `command_invocations.csv`: one row per bash or structured tool invocation.
+- `command_segments.csv`: one row per split shell segment/pseudo-tool.
+- `per_run_category_summary.csv`: complete per-run category counts.
+- `category_taxonomy.json`: category definitions.
+- `source_files.json`: unique source files that contributed counted invocations.
+
+## Generation Manifest
+- Candidate files inspected before hash de-duplication: {stats.get("candidate_files", 0)}
+- Unique candidate files after hash de-duplication: {stats.get("unique_files", 0)}
+- Skipped duplicate files by content hash: {stats.get("skipped_duplicate_files", 0)}
+- Files with extracted invocations before logical call de-duplication: {stats.get("files_with_extracted_invocations", 0)}
+- Logical duplicate invocations removed: {stats.get("deduped_logical_invocations", 0)}
+- Counted source files with kept invocations: {len(source_files_json)}
+
+### Candidate Files By Source Family
+{compat_generation_counter_table(stats.get("candidate_by_source_family", Counter()))}
+
+### Unique Files By Source Family
+{compat_generation_counter_table(stats.get("unique_by_source_family", Counter()))}
+
+### Duplicate Files Skipped By Source Family
+{compat_generation_counter_table(stats.get("duplicate_by_source_family", Counter()))}
+
+### Extracted Invocations By Source Family
+{compat_generation_counter_table(stats.get("extracted_by_source_family", Counter()))}
+
+## Taxonomy
+{chr(10).join(f"- `{key}`: {value}" for key, value in COMPAT_TAXONOMY.items())}
+
+## Bash Segment Categories
+{compat_markdown_table(by_segment_category, ["primary_category", "count"])}
+
+## All Invocation Categories
+{compat_markdown_table(by_invocation_category, ["primary_category", "count"])}
+
+## Source Families
+{compat_markdown_table(by_source_family, ["source_family", "count"])}
+
+## Source Formats
+{compat_markdown_table(by_source_format, ["source_format", "count"])}
+
+## Category By Agent And Mode
+{compat_markdown_table(by_agent_mode_category, ["agent", "mode", "primary_category", "count"], limit=40)}
+
+## Category By Source Family, Agent, Mode, And Benchmark
+{compat_markdown_table(top_run_category, ["source_family", "agent", "mode", "benchmark", "primary_category", "count"], limit=40)}
+
+## Nonzero Exit Examples
+{compat_markdown_table(nonzero_examples, ["agent", "mode", "benchmark", "primary_category", "exit_code", "inner_command", "source_path"], limit=20)}
+"""
+    report_path = output_dir / "report.md"
+    report_path.write_text(report)
+    return report_path
+
+
+def compat_write_outputs(
+    output_dir: Path,
+    calls: list[CompatInvocation],
+    stats: dict[str, Any],
+    source_files_json: list[str],
+) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    invocation_rows = [compat_invocation_row(call) for call in calls]
+    segment_rows = compat_segment_rows(calls)
+    per_run_rows = compat_per_run_rows(calls)
+    paths = {
+        "invocations": output_dir / "command_invocations.csv",
+        "segments": output_dir / "command_segments.csv",
+        "per_run": output_dir / "per_run_category_summary.csv",
+        "taxonomy": output_dir / "category_taxonomy.json",
+        "source_files": output_dir / "source_files.json",
+        "report": output_dir / "report.md",
+    }
+    compat_write_csv(paths["invocations"], invocation_rows, COMPAT_INVOCATION_FIELDS)
+    compat_write_csv(paths["segments"], segment_rows, COMPAT_SEGMENT_FIELDS)
+    compat_write_csv(paths["per_run"], per_run_rows, COMPAT_RUN_SUMMARY_FIELDS)
+    paths["taxonomy"].write_text(json.dumps(COMPAT_TAXONOMY, indent=2) + "\n")
+    paths["source_files"].write_text(json.dumps(source_files_json, indent=2) + "\n")
+    compat_write_report(output_dir, calls, segment_rows, source_files_json, stats)
+    return paths
+
+
+def compat_main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Aggregate and categorize bash calls from EVMBench trace artifacts."
+    )
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="FAMILY=PATH",
+        help="Source root to scan. May be repeated. Defaults to all known trace roots.",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Backward-compatible alias for a single source root labeled runs.",
+    )
+    parser.add_argument("--output-dir", type=Path, default=COMPAT_OUTPUT_DIR)
+    parser.add_argument("--no-plots", action="store_true", help="Accepted for compatibility; plots are not generated.")
+    args = parser.parse_args()
+
+    if args.source:
+        sources = [compat_parse_source(value) for value in args.source]
+    elif args.runs_dir is not None:
+        sources = [CompatSourceSpec(family="runs", root=args.runs_dir)]
+    else:
+        sources = compat_default_sources()
+
+    calls, stats, source_files_json = compat_extract_calls(sources)
+    paths = compat_write_outputs(args.output_dir.resolve(), calls, stats, source_files_json)
+    print(f"Extracted {len(calls)} invocations/tools from {len(source_files_json)} source files")
+    print(f"Wrote {paths['report']}")
+    print(f"Wrote {paths['invocations']}")
+
+
 if __name__ == "__main__":
-    main()
+    compat_main()

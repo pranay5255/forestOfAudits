@@ -3,6 +3,13 @@ env-config-vars: &env-config-vars
   MODEL: o4-mini
   REASONING_EFFORT: high
 
+qwen-vllm-vars: &qwen-vllm-vars
+  VLLM_API_BASE: ${{ secrets.VLLM_API_BASE }}
+  VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+  VLLM_SERVED_MODEL_NAME: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+  MODEL: ${{ secrets.VLLM_SERVED_MODEL_NAME }}
+  CODEX_PROVIDER_ID: vllm
+
 common: &common_settings
   start: codex/start.sh
   instruction_file_name: AGENTS.md
@@ -14,6 +21,11 @@ codex-default:
   <<: *common_settings
   env_vars:
     <<: *env-config-vars
+
+codex-qwen-vllm:
+  <<: *common_settings
+  env_vars:
+    <<: *qwen-vllm-vars
 
 codex-gpt-5.3-codex:
   <<: *common_settings

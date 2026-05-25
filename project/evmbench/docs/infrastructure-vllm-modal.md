@@ -124,25 +124,38 @@ MODEL                 = openai/$VLLM_SERVED_MODEL_NAME
 
 ## Endpoint Profiles
 
-The current Phase 6-compatible dual-H100 profile is:
+The canonical open-model experiment profile is dense Qwen3.6-27B on 8 H100s
+with a 524K token context window, Qwen parser/template settings, MTP
+speculative decoding, server-side GPU telemetry, and Torch profiler support:
 
 ```text
-gpu=H100:2
-model=Qwen/Qwen3.6-35B-A3B-FP8
-served_model=Qwen/Qwen3.6-35B-A3B-FP8
-tensor_parallel_size=2
-max_model_len=65536
-max_num_seqs=2
-dtype=auto
-mtp=disabled
+gpu=H100:8
+model=Qwen/Qwen3.6-27B
+served_model=Qwen/Qwen3.6-27B
+tensor_parallel_size=8
+max_model_len=524288
+max_num_seqs=1
+dtype=bfloat16
+gpu_memory_utilization=0.94
+reasoning_parser=qwen3
 tool_call_parser=qwen3_coder
-scaledown_window_seconds=1800
+generation_config=vllm
+log_stats_interval=5
+profile_volume_name=evmbench-vllm-profiles
+scaledown_window_seconds=43200
 ```
 
-The dual-H100 profile is intentionally guarded. Always pass both
-`VLLM_ALLOW_EXPENSIVE_GPU=1` and `--allow-expensive-gpu` when deploying it.
+This profile is intentionally guarded. Always pass both
+`VLLM_ALLOW_EXPENSIVE_GPU=1` and `--allow-expensive-gpu` for multi-GPU Modal
+deployments. The detailed model-swap guidance and artifact map live in
+`vllmModel/README.md`.
 
-A smaller H100 profile has also been used for OpenCode and early smoke tests:
+For a full roughly 1M token context, change `--max-model-len` to `1010000` and
+change the YaRN `factor` in `--hf-overrides` to `4.0`. For windows at or below
+262K, prefer no YaRN unless long-context extrapolation is part of the
+experiment.
+
+A smaller single-H100 FP8 profile remains useful for smoke tests:
 
 ```text
 gpu=H100
@@ -157,45 +170,54 @@ tool_call_parser=qwen3_coder
 Run from the repository root:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python evmbench/agents/mini-swe-agent/setup_vllm_modal_env.py \
-  --gpu H100:2 \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 \
-  --served-model-name Qwen/Qwen3.6-35B-A3B-FP8 \
-  --tensor-parallel-size 2 \
-  --max-model-len 65536 \
-  --max-num-seqs 2 \
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m evmbench.vllm setup-env \
+  --gpu H100:8 \
+  --model Qwen/Qwen3.6-27B \
+  --served-model-name Qwen/Qwen3.6-27B \
+  --tensor-parallel-size 8 \
+  --max-model-len 524288 \
+  --allow-long-max-model-len \
+  --max-num-seqs 1 \
   --gpu-memory-utilization 0.94 \
-  --dtype auto \
-  --no-enable-mtp \
+  --dtype bfloat16 \
   --tool-call-parser qwen3_coder \
-  --startup-timeout-seconds 1200 \
-  --scaledown-window-seconds 1800
+  --reasoning-parser qwen3 \
+  --generation-config vllm \
+  --enable-gpu-telemetry \
+  --enable-torch-profiler \
+  --profile-volume-name evmbench-vllm-profiles \
+  --log-stats-interval 5 \
+  --startup-timeout-seconds 1800 \
+  --scaledown-window-seconds 43200
 ```
 
 To rotate the local vLLM API key:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python evmbench/agents/mini-swe-agent/setup_vllm_modal_env.py \
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m evmbench.vllm setup-env \
   --rotate-api-key
 ```
 
 To sync the current `.env` key into the Modal secret without rewriting `.env`:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python evmbench/agents/mini-swe-agent/setup_vllm_modal_env.py \
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m evmbench.vllm setup-env \
   --no-write-env
 ```
 
-Minimum `.env` values for vLLM-backed Phase 6 runs:
+Minimum `.env` values for vLLM-backed open-model runs:
 
 ```bash
 VLLM_API_BASE=https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1
 VLLM_API_KEY=<redacted>
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B-FP8
-VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8
+VLLM_MODEL=Qwen/Qwen3.6-27B
+VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-27B
 VLLM_TOOL_CALL_PARSER=qwen3_coder
-VLLM_LITELLM_MODEL=openai/Qwen/Qwen3.6-35B-A3B-FP8
-MODEL=openai/Qwen/Qwen3.6-35B-A3B-FP8
+VLLM_PROFILE_VOLUME_NAME=evmbench-vllm-profiles
+VLLM_ENABLE_GPU_TELEMETRY=1
+VLLM_ENABLE_TORCH_PROFILER=1
+VLLM_LITELLM_MODEL=openai/Qwen/Qwen3.6-27B
+MODEL=openai/Qwen/Qwen3.6-27B
 MODEL_KWARGS_JSON={"drop_params":true}
 MSWEA_COST_TRACKING=ignore_errors
 MODAL_AUDIT_IMAGE_REPO=ghcr.io/pranay5255/evmbench-audit
@@ -210,38 +232,80 @@ VLLM_SCALEDOWN_WINDOW_SECONDS=43200
 
 Do not commit `.env`; it contains the endpoint URL and API key.
 
+### Direct Harness Runs
+
+Run vLLM experiments through the repo-level forest-free runner:
+
+```bash
+uv run python -m evmbench.vllm run-harness \
+  --harness codex \
+  --mode detect \
+  --audit-id 2024-01-canto \
+  --metrics \
+  --metrics-interval-seconds 5 \
+  --kernel-profile torch
+```
+
+`--harness` accepts `codex`, `opencode`, and `mini-swe-agent`. These map to
+`codex-qwen-vllm`, `opencode-qwen-vllm`, and `mini-swe-agent-qwen-vllm` and run
+`evmbench.nano.entrypoint` with `runner.concurrency=1`. This path intentionally
+bypasses `modal_forest`, forest scouts, forest judges, and Phase 6 forest shell
+wrappers while the forest looping issue is debugged separately.
+
+Each run writes `run-manifest.json`, stdout/stderr logs, raw Prometheus metrics,
+parsed samples, summaries, poll JSONL, filtered GPU telemetry, Torch profiler
+indexes, CUDA summaries when traces are parseable, and
+`metrics/metrics-manifest.json`. Nsight Compute and DCGM hardware counters are
+heavier optional workflows because they may require extra host tooling and
+privileges.
+
 ## Deploy And Verify
 
-Deploy the dual-H100 endpoint and write the resolved endpoint URL back to
-`.env`:
+Deploy the canonical Qwen3.6-27B endpoint and write the resolved endpoint URL
+back to `.env`:
 
 ```bash
 VLLM_ALLOW_EXPENSIVE_GPU=1 \
-UV_CACHE_DIR=/tmp/uv-cache uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m evmbench.vllm deploy \
   --sync-secret \
   --write-env \
-  --gpu H100:2 \
+  --rotate-api-key \
   --allow-expensive-gpu \
-  --model Qwen/Qwen3.6-35B-A3B-FP8 \
-  --served-model-name Qwen/Qwen3.6-35B-A3B-FP8 \
-  --tensor-parallel-size 2 \
-  --max-model-len 65536 \
-  --max-num-seqs 2 \
+  --gpu H100:8 \
+  --tensor-parallel-size 8 \
+  --model Qwen/Qwen3.6-27B \
+  --served-model-name Qwen/Qwen3.6-27B \
+  --max-model-len 524288 \
+  --allow-long-max-model-len \
+  --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":2.0,"original_max_position_embeddings":262144}}}' \
+  --max-num-seqs 1 \
   --gpu-memory-utilization 0.94 \
-  --dtype auto \
-  --no-enable-mtp \
+  --dtype bfloat16 \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
-  --scaledown-window-seconds 1800 \
-  --startup-timeout-seconds 1200 \
-  --wait-timeout 1800 \
+  --language-model-only \
+  --enable-mtp \
+  --num-speculative-tokens 2 \
+  --generation-config vllm \
+  --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"presence_penalty":0.0,"repetition_penalty":1.0}' \
+  --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true}' \
+  --enable-gpu-telemetry \
+  --gpu-telemetry-interval-seconds 1 \
+  --enable-torch-profiler \
+  --profile-volume-name evmbench-vllm-profiles \
+  --log-stats-interval 5 \
+  --startup-timeout-seconds 1800 \
+  --scaledown-window-seconds 43200 \
+  --wait-timeout 2400 \
   --request-timeout 300 \
-  --chat-timeout 600
+  --chat-timeout 900
 ```
 
 Verify an existing deployment without redeploying:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m evmbench.vllm deploy \
   --skip-deploy \
   --wait-timeout 1800 \
   --request-timeout 300 \
@@ -254,14 +318,17 @@ Check the effective `.env` profile without printing secrets:
 rg -n 'VLLM_API_BASE|VLLM_API_KEY|VLLM_MODEL|VLLM_SERVED_MODEL_NAME|VLLM_LITELLM_MODEL|MODEL_KWARGS_JSON|MSWEA_COST_TRACKING|VLLM_MODAL_GPU|VLLM_TENSOR_PARALLEL_SIZE|VLLM_MAX_MODEL_LEN|VLLM_MAX_NUM_SEQS|VLLM_SCALEDOWN_WINDOW_SECONDS' .env
 ```
 
-Expected dual-H100 values:
+Expected Qwen3.6-27B long-context values:
 
 ```text
-VLLM_MODAL_GPU="H100:2"
-VLLM_TENSOR_PARALLEL_SIZE="2"
-VLLM_MAX_MODEL_LEN="65536"
-VLLM_MAX_NUM_SEQS="2"
-VLLM_SCALEDOWN_WINDOW_SECONDS="1800"
+VLLM_MODAL_GPU="H100:8"
+VLLM_TENSOR_PARALLEL_SIZE="8"
+VLLM_MAX_MODEL_LEN="524288"
+VLLM_MAX_NUM_SEQS="1"
+VLLM_ENABLE_GPU_TELEMETRY="1"
+VLLM_ENABLE_TORCH_PROFILER="1"
+VLLM_PROFILE_VOLUME_NAME="evmbench-vllm-profiles"
+VLLM_SCALEDOWN_WINDOW_SECONDS="43200"
 MODEL_KWARGS_JSON="{\"drop_params\":true}"
 MSWEA_COST_TRACKING="ignore_errors"
 ```

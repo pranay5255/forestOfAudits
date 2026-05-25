@@ -1,4 +1,6 @@
 import importlib.util
+import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -117,3 +119,111 @@ def test_deploy_env_sets_expensive_gpu_opt_in_when_allowed() -> None:
 
     assert env["VLLM_ALLOW_EXPENSIVE_GPU"] == "1"
     assert env["VLLM_MODAL_GPU"] == "H100:2"
+
+
+
+def test_deploy_env_exports_qwen36_long_context_server_knobs() -> None:
+    config = deploy.VLLMServerConfig(
+        gpu="H100:8",
+        model="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        tensor_parallel_size="8",
+        max_model_len="524288",
+        max_num_seqs="1",
+        gpu_memory_utilization="0.94",
+        dtype="bfloat16",
+        enable_mtp=True,
+        num_speculative_tokens="2",
+        tool_call_parser="qwen3_coder",
+        fast_boot=False,
+        startup_timeout_seconds=1800,
+        scaledown_window_seconds=43200,
+        reasoning_parser="qwen3",
+        enable_auto_tool_choice=True,
+        language_model_only=True,
+        hf_overrides='{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":2.0}}}',
+        generation_config="vllm",
+        override_generation_config='{"temperature":0.6,"top_p":0.95,"top_k":20}',
+        default_chat_template_kwargs='{"enable_thinking":true,"preserve_thinking":true}',
+        allow_long_max_model_len=True,
+        log_stats_interval="5",
+    )
+
+    env = deploy._deploy_env(
+        config,
+        api_key="test-key",
+        hf_token="",
+        allow_expensive_gpu=True,
+    )
+
+    assert env["VLLM_MODEL"] == "Qwen/Qwen3.6-27B"
+    assert env["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] == "1"
+    assert env["VLLM_HF_OVERRIDES"] == config.hf_overrides
+    assert env["VLLM_GENERATION_CONFIG"] == "vllm"
+    assert env["VLLM_OVERRIDE_GENERATION_CONFIG"] == config.override_generation_config
+    assert env["VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS"] == config.default_chat_template_kwargs
+    assert env["VLLM_LANGUAGE_MODEL_ONLY"] == "1"
+    assert env["VLLM_LOG_STATS_INTERVAL"] == "5"
+
+
+def test_deploy_env_exports_profile_and_telemetry_knobs() -> None:
+    config = deploy.VLLMServerConfig(
+        gpu="H100:8",
+        model="Qwen/Qwen3.6-27B",
+        served_model_name="Qwen/Qwen3.6-27B",
+        tensor_parallel_size="8",
+        max_model_len="524288",
+        max_num_seqs="1",
+        gpu_memory_utilization="0.94",
+        dtype="bfloat16",
+        enable_mtp=True,
+        num_speculative_tokens="2",
+        tool_call_parser="qwen3_coder",
+        fast_boot=False,
+        startup_timeout_seconds=1800,
+        scaledown_window_seconds=43200,
+        enable_gpu_telemetry=True,
+        gpu_telemetry_interval_seconds="1",
+        enable_torch_profiler=True,
+        profile_volume_name="unit-vllm-profiles",
+    )
+
+    env = deploy._deploy_env(
+        config,
+        api_key="test-key",
+        hf_token="",
+        allow_expensive_gpu=True,
+    )
+
+    assert env["VLLM_ENABLE_GPU_TELEMETRY"] == "1"
+    assert env["VLLM_GPU_TELEMETRY_INTERVAL_SECONDS"] == "1"
+    assert env["VLLM_ENABLE_TORCH_PROFILER"] == "1"
+    assert env["VLLM_PROFILE_VOLUME_NAME"] == "unit-vllm-profiles"
+
+
+
+def test_modal_server_builds_torch_profiler_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_MODAL_GPU", "H100:1")
+    monkeypatch.setenv("VLLM_ENABLE_TORCH_PROFILER", "1")
+    monkeypatch.setenv("VLLM_ENABLE_GPU_TELEMETRY", "1")
+    monkeypatch.setenv("VLLM_GPU_TELEMETRY_INTERVAL_SECONDS", "2")
+    monkeypatch.setenv("VLLM_PROFILE_VOLUME_NAME", "unit-vllm-profiles")
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    monkeypatch.delenv("VLLM_ALLOW_EXPENSIVE_GPU", raising=False)
+
+    import evmbench.vllm.modal_server as modal_server
+
+    modal_server = importlib.reload(modal_server)
+    command = modal_server.build_vllm_command("secret-key")
+
+    assert modal_server.PROFILE_VOLUME_NAME == "unit-vllm-profiles"
+    assert modal_server.ENABLE_GPU_TELEMETRY is True
+    assert modal_server.GPU_TELEMETRY_INTERVAL_SECONDS == 2.0
+    assert "--allow-long-max-model-len" not in command
+    assert "--log-stats-interval" not in command
+    profiler_index = command.index("--profiler-config")
+    profiler_config = json.loads(command[profiler_index + 1])
+    assert profiler_config == {
+        "profiler": "torch",
+        "torch_profiler_dir": modal_server.TORCH_PROFILER_DIR,
+    }

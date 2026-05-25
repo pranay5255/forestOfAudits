@@ -421,78 +421,75 @@ modal secret create openai-api-key OPENAI_API_KEY="$OPENAI_API_KEY"
 
 ### Self-host Qwen vLLM on Modal
 
-`evmbench/agents/mini-swe-agent/deploy_vllm.py` deploys an OpenAI-compatible
-vLLM server for `Qwen/Qwen3.6-35B-A3B`. The default deployment uses
-a single B200, BF16 weights, a 32K context window, Qwen
-reasoning parsing, prefix caching, MTP speculative decoding, and
-`--language-model-only` to skip the vision encoder.
+`evmbench.vllm` is the canonical repo-level surface for the reusable
+OpenAI-compatible vLLM endpoint. The old mini-swe-agent vLLM files remain as
+compatibility wrappers, but new commands should use `uv run python -m
+evmbench.vllm ...`.
 
-Deploy and verify the endpoint. The script loads `.env`, creates or updates
-the `evmbench-vllm-token` Modal secret, deploys the app, checks `/health`,
-`/v1/models`, and `/v1/chat/completions`, then writes the resolved
-`VLLM_API_BASE` and `VLLM_API_KEY` back to `.env`:
+The default deployment serves `Qwen/Qwen3.6-35B-A3B-FP8` on one H100 with a
+32K context window, Qwen reasoning parsing, prefix caching, MTP speculative
+decoding, and `/v1/chat/completions` compatibility.
 
-```bash
-uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py
-```
-
-Use a single H100 with the FP8 checkpoint:
+Set up local `.env` values and the Modal secret:
 
 ```bash
-uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py --gpu H100
+uv run python -m evmbench.vllm setup-env
 ```
 
-Use two H100s with the default BF16 checkpoint:
+Deploy and verify the endpoint:
 
 ```bash
-uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py --gpu H100:2
+uv run python -m evmbench.vllm deploy --write-env
 ```
 
-To verify an already deployed endpoint without redeploying:
+Use a single H100 with the FP8 checkpoint explicitly:
 
 ```bash
-uv run python evmbench/agents/mini-swe-agent/deploy_vllm_server.py \
-  --skip-secret \
-  --skip-deploy
+uv run python -m evmbench.vllm deploy --gpu H100 --write-env
 ```
 
-Optionally pre-download the model into the Modal Hugging Face cache volume:
+Use two H100s with an explicit opt-in:
 
 ```bash
-uv run modal run evmbench/agents/mini-swe-agent/deploy_vllm.py --download-only
+VLLM_ALLOW_EXPENSIVE_GPU=1 \
+uv run python -m evmbench.vllm deploy --gpu H100:2 --allow-expensive-gpu --write-env
 ```
 
-Run the vLLM smoke:
+Verify an already deployed endpoint without redeploying:
 
 ```bash
-evmbench/agents/mini-swe-agent/run_vllm_smoke.sh
+uv run python -m evmbench.vllm verify
 ```
 
-Run one basic Modal baseline detect task against the vLLM endpoint. The script
-loads `.env`, verifies the vLLM endpoint before spending a baseline run, starts
-the Modal sandbox agent, and fails unless `submission/audit.md` exists and is
-non-empty:
+Collect one raw Prometheus metrics snapshot from `/metrics`:
 
 ```bash
-uv run python evmbench/agents/mini-swe-agent/run_vllm_modal_baseline.py \
-  --audit-id 2024-01-canto
+uv run python -m evmbench.vllm metrics snapshot
 ```
 
-Use the registered vLLM baseline agent in EVMBench:
+Run one forest-free EVMBench task against vLLM. The command records a
+`run-manifest.json`, stdout/stderr logs, raw `.prom` metrics snapshots, parsed
+sample JSON, summaries, filtered GPU telemetry, Torch profiler indexes, and a
+`metrics/metrics-manifest.json` under the run directory.
 
 ```bash
-uv run python -m evmbench.nano.entrypoint \
-  evmbench.audit=2024-01-canto \
-  evmbench.mode=detect \
-  evmbench.hint_level=none \
-  evmbench.log_to_run_dir=True \
-  evmbench.solver=evmbench.nano.solver.EVMbenchSolver \
-  evmbench.solver.agent_id=mini-swe-agent-modal-baseline-qwen-vllm \
-  runner.concurrency=1
+uv run python -m evmbench.vllm run-harness \
+  --harness codex \
+  --mode detect \
+  --audit-id 2024-01-canto \
+  --metrics \
+  --metrics-interval-seconds 5 \
+  --kernel-profile torch
 ```
 
-In the full EVMBench command, the agent call goes to vLLM. Detect grading still
-uses the configured EVMBench judge model.
+Supported direct harnesses are `codex`, `opencode`, and `mini-swe-agent`, which
+map to `codex-qwen-vllm`, `opencode-qwen-vllm`, and
+`mini-swe-agent-qwen-vllm`. This path does not use `modal_forest`, forest
+scouts, forest judges, or Phase 6 forest wrappers.
+
+For open-model experiments, including the canonical Qwen3.6-27B 8xH100
+long-context command with YaRN, GPU telemetry, and Torch profiling, see
+`vllmModel/README.md`.
 
 Useful deployment overrides:
 
@@ -500,20 +497,20 @@ Useful deployment overrides:
 # Previous exact-BF16 default if you want to compare B200 against 2x A100-80GB.
 VLLM_MODAL_GPU=A100-80GB:2 \
 VLLM_TENSOR_PARALLEL_SIZE=2 \
-uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+uv run python -m evmbench.vllm deploy --allow-expensive-gpu
 
 # More context on more GPUs.
 VLLM_MODAL_GPU=H100:4 \
 VLLM_TENSOR_PARALLEL_SIZE=4 \
 VLLM_MAX_MODEL_LEN=131072 \
-uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+uv run python -m evmbench.vllm deploy --allow-expensive-gpu
 
 # Lower cost/faster cold starts if the FP8 model is acceptable.
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B-FP8 \
 VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
 VLLM_MODAL_GPU=H100:1 \
 VLLM_TENSOR_PARALLEL_SIZE=1 \
-uv run modal deploy evmbench/agents/mini-swe-agent/deploy_vllm.py
+uv run python -m evmbench.vllm deploy --allow-expensive-gpu
 ```
 
 The Phase 6 shell wrappers load `.env` automatically when it exists.
@@ -587,7 +584,7 @@ Python harness.
 | `smoke` | `codex-default`, `mini-smoke-10`, `modal-baseline-smoke-10`, `modal-forest-smoke` |
 | `modal-debug` | Modal smoke runners plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
 | `forest-debug` | `modal-forest-smoke` plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
-| `vllm` | Qwen vLLM Modal baseline and forest variants |
+| `vllm` | legacy Qwen vLLM Phase 6 variants; prefer `evmbench.vllm run-harness` for new open-model experiments |
 | `modal` | `modal-baseline`, `modal-forest` |
 | `local` | local `mini-swe-agent` variants |
 | `all` | every registered Phase 6 variant |

@@ -69,6 +69,7 @@ class VLLMServerConfig:
     gpu_telemetry_interval_seconds: str = "1"
     enable_torch_profiler: bool = False
     profile_volume_name: str = DEFAULT_PROFILE_VOLUME_NAME
+    chat_template_mode: str = ""
 
 
 def _deploy_file() -> Path:
@@ -166,6 +167,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=clean_env_value(os.getenv("VLLM_PROFILE_VOLUME_NAME")) or DEFAULT_PROFILE_VOLUME_NAME,
         help="Modal Volume used for Torch profiler traces and GPU telemetry.",
     )
+    parser.add_argument("--chat-template-mode", default=clean_env_value(os.getenv("VLLM_CHAT_TEMPLATE_MODE")))
     parser.add_argument("--fast-boot", action=argparse.BooleanOptionalAction, default=env_bool("VLLM_FAST_BOOT", False))
     parser.add_argument(
         "--allow-expensive-gpu",
@@ -336,6 +338,7 @@ def _resolve_server_config(args: argparse.Namespace, cli_args: list[str]) -> VLL
         gpu_telemetry_interval_seconds=str(args.gpu_telemetry_interval_seconds),
         enable_torch_profiler=args.enable_torch_profiler,
         profile_volume_name=args.profile_volume_name,
+        chat_template_mode=args.chat_template_mode,
         fast_boot=args.fast_boot,
         startup_timeout_seconds=args.startup_timeout_seconds,
         scaledown_window_seconds=args.scaledown_window_seconds,
@@ -377,6 +380,7 @@ def _deploy_env(
             "VLLM_GPU_TELEMETRY_INTERVAL_SECONDS": config.gpu_telemetry_interval_seconds,
             "VLLM_ENABLE_TORCH_PROFILER": "1" if config.enable_torch_profiler else "0",
             "VLLM_PROFILE_VOLUME_NAME": config.profile_volume_name,
+            "VLLM_CHAT_TEMPLATE_MODE": config.chat_template_mode,
             "VLLM_FAST_BOOT": "1" if config.fast_boot else "0",
             "VLLM_STARTUP_TIMEOUT_SECONDS": str(config.startup_timeout_seconds),
             "VLLM_SCALEDOWN_WINDOW_SECONDS": str(config.scaledown_window_seconds),
@@ -438,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[deploy]   gpu_telemetry_interval_seconds={config.gpu_telemetry_interval_seconds}", flush=True)
         print(f"[deploy]   enable_torch_profiler={config.enable_torch_profiler}", flush=True)
         print(f"[deploy]   profile_volume_name={config.profile_volume_name}", flush=True)
+        print(f"[deploy]   chat_template_mode={config.chat_template_mode or '-'}", flush=True)
         print(f"[deploy]   startup_timeout_seconds={config.startup_timeout_seconds}", flush=True)
         print(f"[deploy]   scaledown_window_seconds={config.scaledown_window_seconds}", flush=True)
         print(f"[deploy]   allow_expensive_gpu={args.allow_expensive_gpu}", flush=True)
@@ -507,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
                     "VLLM_GPU_TELEMETRY_INTERVAL_SECONDS": config.gpu_telemetry_interval_seconds,
                     "VLLM_ENABLE_TORCH_PROFILER": "1" if config.enable_torch_profiler else "0",
                     "VLLM_PROFILE_VOLUME_NAME": config.profile_volume_name,
+                    "VLLM_CHAT_TEMPLATE_MODE": config.chat_template_mode,
                     "VLLM_STARTUP_TIMEOUT_SECONDS": str(config.startup_timeout_seconds),
                     "VLLM_SCALEDOWN_WINDOW_SECONDS": str(config.scaledown_window_seconds),
                 },
@@ -541,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
                 "gpu_telemetry_interval_seconds": config.gpu_telemetry_interval_seconds,
                 "enable_torch_profiler": config.enable_torch_profiler,
                 "profile_volume_name": config.profile_volume_name,
+                "chat_template_mode": config.chat_template_mode,
                 "startup_timeout_seconds": config.startup_timeout_seconds,
                 "scaledown_window_seconds": config.scaledown_window_seconds,
                 "verification": verification.__dict__,

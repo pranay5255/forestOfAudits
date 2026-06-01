@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenRouter v1 mixed-task experiment harness for EVMBench."""
+"""Generic provider mixed-task experiment harness for EVMBench."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ Mode = Literal["detect", "patch", "exploit"]
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_AZURE_FOUNDRY_MODEL = "gpt-4.1-nano"
 DEFAULT_BASE_URL = DEFAULT_OPENROUTER_BASE_URL
 MATRIX_FILENAME = "openrouter-v1-matrix.json"
 RESULTS_FILENAME = "openrouter-v1-results.json"
@@ -58,6 +59,8 @@ class ProviderSpec:
     api_key_env_var: str
     default_base_url: str
     display_label: str
+    default_base_url_env_var: str | None = None
+    default_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,8 +86,8 @@ class OpenRouterV1Run:
 
 
 HARNESS_SPECS: dict[str, HarnessSpec] = {
-    "codex": HarnessSpec("codex", "codex-openrouter-v1", "Codex CLI via OpenRouter Responses"),
-    "opencode": HarnessSpec("opencode", "opencode-openrouter-v1", "OpenCode via OpenRouter"),
+    "codex": HarnessSpec("codex", "codex-openrouter-v1", "Codex CLI via provider Responses"),
+    "opencode": HarnessSpec("opencode", "opencode-openrouter-v1", "OpenCode via provider"),
 }
 
 PROVIDER_SPECS: dict[str, ProviderSpec] = {
@@ -99,6 +102,21 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         api_key_env_var="OPENAI_API_KEY",
         default_base_url=DEFAULT_OPENAI_BASE_URL,
         display_label="OpenAI",
+    ),
+    "vllm": ProviderSpec(
+        provider_id="vllm",
+        api_key_env_var="VLLM_API_KEY",
+        default_base_url="",
+        display_label="vLLM",
+        default_base_url_env_var="VLLM_API_BASE",
+    ),
+    "azure-foundry": ProviderSpec(
+        provider_id="azure-foundry",
+        api_key_env_var="AZURE_FOUNDRY_API_KEY",
+        default_base_url="",
+        display_label="Azure Foundry",
+        default_base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+        default_model=DEFAULT_AZURE_FOUNDRY_MODEL,
     ),
 }
 
@@ -165,11 +183,81 @@ def parse_provider(raw: str) -> ProviderSpec:
     return spec
 
 
+def _clean_env_value(value: str | None) -> str:
+    stripped = (value or "").strip()
+    if not stripped or stripped.startswith("${{"):
+        return ""
+    return stripped
+
+
+def _dotenv_values(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def load_env_file(path: Path, *, override: bool = False) -> dict[str, str]:
+    values = _dotenv_values(path)
+    for key, value in values.items():
+        if override or key not in os.environ:
+            os.environ[key] = value
+    return values
+
+
+def _alias_env(target: str, *sources: str) -> None:
+    if _clean_env_value(os.environ.get(target)):
+        return
+    for source in sources:
+        value = _clean_env_value(os.environ.get(source))
+        if value:
+            os.environ[target] = value
+            return
+
+
+def load_provider_environment(provider: ProviderSpec | str, *, root: Path | None = None) -> None:
+    root = root or project_root()
+    load_env_file(root / ".env")
+    provider_spec = parse_provider(provider) if isinstance(provider, str) else provider
+    if provider_spec.provider_id != "azure-foundry":
+        return
+
+    load_env_file(root / ".env.azure")
+    _alias_env("AZURE_FOUNDRY_API_KEY", "API_KEY")
+    _alias_env("AZURE_FOUNDRY_BASE_URL", "PROJ_ENPOINT", "PROJ_ENDPOINT")
+    _alias_env("AZURE_FOUNDRY_PROJECT_ENDPOINT", "BASE_ENDPOINT")
+
+
+def provider_default_base_url(spec: ProviderSpec) -> str:
+    if spec.default_base_url_env_var:
+        value = _clean_env_value(os.environ.get(spec.default_base_url_env_var))
+        if value:
+            return value
+    return spec.default_base_url
+
+
 def normalize_provider_base_url(provider: ProviderSpec | str, raw: str | None) -> str:
     spec = parse_provider(provider) if isinstance(provider, str) else provider
-    value = (raw or spec.default_base_url).strip().rstrip("/")
+    value = (raw or provider_default_base_url(spec)).strip().rstrip("/")
     if not value:
-        value = spec.default_base_url
+        hint = f" or {spec.default_base_url_env_var}" if spec.default_base_url_env_var else ""
+        raise ValueError(f"Provider {spec.provider_id!r} requires --base-url{hint}.")
     if "://" not in value:
         value = f"https://{value}"
     parsed = urlparse(value)
@@ -274,6 +362,7 @@ def build_evmbench_command(
     runs_dir: Path,
     mode: Mode,
     agent_timeout_seconds: float | None,
+    judge_model: str | None = None,
 ) -> tuple[str, ...]:
     command = [
         "uv",
@@ -293,6 +382,8 @@ def build_evmbench_command(
     ]
     if agent_timeout_seconds and agent_timeout_seconds > 0:
         command.append(f"evmbench.solver.timeout={int(agent_timeout_seconds)}")
+    if judge_model:
+        command.append(f"evmbench.solver.judge_model={judge_model}")
     return tuple(command)
 
 
@@ -325,8 +416,16 @@ def build_run_matrix(
                         {
                             "EVMBENCH_OPENROUTER_MODEL": model,
                             "EVMBENCH_OPENROUTER_BASE_URL": normalized_base_url,
+                            "OPENROUTER_BASE_URL": normalized_base_url,
                         }
                     )
+                elif provider_spec.provider_id == "openai":
+                    env["OPENAI_BASE_URL"] = normalized_base_url
+                elif provider_spec.provider_id == "vllm":
+                    env["VLLM_API_BASE"] = normalized_base_url
+                elif provider_spec.provider_id == "azure-foundry":
+                    env["AZURE_FOUNDRY_BASE_URL"] = normalized_base_url
+                    env["OPENAI_BASE_URL"] = normalized_base_url
                 if agent_timeout_seconds and agent_timeout_seconds > 0:
                     env["EVMBENCH_OPENROUTER_AGENT_TIMEOUT_SECONDS"] = str(int(agent_timeout_seconds))
                 matrix.append(
@@ -347,6 +446,7 @@ def build_run_matrix(
                             runs_dir=runs_dir,
                             mode=task.mode,
                             agent_timeout_seconds=agent_timeout_seconds,
+                            judge_model=model if provider_spec.provider_id == "azure-foundry" else None,
                         ),
                         env=env,
                     )
@@ -487,6 +587,11 @@ def _run_command_streaming(
 ) -> int:
     env = os.environ.copy()
     env.update(item.env)
+    if item.provider == "azure-foundry":
+        azure_key = env.get(item.api_key_env_var, "").strip()
+        if azure_key:
+            env["OPENAI_API_KEY"] = azure_key
+            env["OPENAI_BASE_URL"] = item.base_url
     env.setdefault("PYTHONUNBUFFERED", "1")
     with stdout_log.open("w", encoding="utf-8", buffering=1) as stdout_file, stderr_log.open(
         "w",
@@ -794,7 +899,7 @@ def _fmt(value: Any) -> str:
 
 def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: dict[str, Any]) -> str:
     lines = [
-        "# OpenRouter V1 Summary",
+        "# Provider V1 Summary",
         "",
         f"Output root: `{output_root}`",
         "",
@@ -901,7 +1006,7 @@ def summarize_openrouter_v1(output_root: Path, matrix: list[OpenRouterV1Run] | N
     output_root = output_root.resolve()
     matrix = matrix or _load_matrix(output_root)
     if matrix is None:
-        raise FileNotFoundError(f"Missing {output_root / MATRIX_FILENAME}; cannot summarize OpenRouter v1 run.")
+        raise FileNotFoundError(f"Missing {output_root / MATRIX_FILENAME}; cannot summarize provider v1 run.")
     rows = [summarize_row(output_root, item) for item in matrix]
     aggregate = aggregate_rows(rows)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1010,7 +1115,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     def add_matrix_args(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument("--tasks", required=True, help="Comma-separated mode:audit_id entries.")
         subparser.add_argument("--harnesses", required=True, help="Comma-separated harnesses: codex,opencode.")
-        subparser.add_argument("--model", action="append", required=True, help="Provider model id. Repeatable.")
+        subparser.add_argument(
+            "--model",
+            action="append",
+            default=[],
+            help="Provider model id. Repeatable. Defaults to gpt-4.1-nano for azure-foundry.",
+        )
         subparser.add_argument(
             "--provider",
             choices=sorted(PROVIDER_SPECS),
@@ -1026,10 +1136,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             help="EVMBench solver timeout per task. Use 0 to keep the solver default.",
         )
 
-    plan_parser = subparsers.add_parser("plan", help="Print the OpenRouter v1 command matrix.")
+    plan_parser = subparsers.add_parser("plan", help="Print the provider command matrix.")
     add_matrix_args(plan_parser)
 
-    run_parser = subparsers.add_parser("run", help="Run the OpenRouter v1 command matrix sequentially.")
+    run_parser = subparsers.add_parser("run", help="Run the provider command matrix sequentially.")
     add_matrix_args(run_parser)
     run_parser.add_argument("--stop-on-failure", action="store_true")
     run_parser.add_argument(
@@ -1039,7 +1149,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Wall-clock timeout for one uv/EVMBench process. Use 0 to disable.",
     )
 
-    summarize_parser = subparsers.add_parser("summarize", help="Summarize an existing OpenRouter v1 output root.")
+    summarize_parser = subparsers.add_parser("summarize", help="Summarize an existing provider output root.")
     summarize_parser.add_argument("--output-root", type=Path, required=True)
 
     docker_parser = subparsers.add_parser(
@@ -1058,9 +1168,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, list[OpenRouterV1Run]]:
     output_root = (args.output_root or default_output_root()).resolve()
+    provider = parse_provider(args.provider)
     tasks = parse_task_list(args.tasks)
     harnesses = parse_harness_list(args.harnesses)
     models = [model.strip() for model in args.model if model and model.strip()]
+    if not models and provider.default_model:
+        models = [provider.default_model]
     if not models:
         raise ValueError("--model did not contain any model IDs.")
     matrix = build_run_matrix(
@@ -1068,7 +1181,7 @@ def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, list[OpenRouterV1
         tasks=tasks,
         harnesses=harnesses,
         models=models,
-        provider=parse_provider(args.provider),
+        provider=provider,
         base_url=args.base_url,
         agent_timeout_seconds=args.agent_timeout_seconds if args.agent_timeout_seconds > 0 else None,
     )
@@ -1076,18 +1189,21 @@ def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, list[OpenRouterV1
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file(project_root() / ".env")
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     try:
+        if hasattr(args, "provider"):
+            load_provider_environment(args.provider)
         if args.command == "plan":
             output_root, matrix = _matrix_from_args(args)
-            print(f"# OpenRouter v1 output root: {output_root}")
+            print(f"# Provider v1 output root: {output_root}")
             print(f"# Runs: {len(matrix)}")
             print_plan(matrix)
             return 0
         if args.command == "run":
             output_root, matrix = _matrix_from_args(args)
-            print(f"Writing OpenRouter v1 outputs to {output_root}")
+            print(f"Writing provider v1 outputs to {output_root}")
             item_timeout_seconds = args.item_timeout_seconds if args.item_timeout_seconds > 0 else None
             return run_matrix(
                 output_root,
@@ -1112,7 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 print(json.dumps(commands, indent=2))
             else:
-                print("# Build the local Docker images required by this OpenRouter v1 task set.")
+                print("# Build the local Docker images required by this provider task set.")
                 for command in commands:
                     print(shlex.join(command))
             return 0

@@ -74,7 +74,7 @@ def test_registry_loads_opencode_vllm_variant(monkeypatch) -> None:
     assert agent.env_vars["VLLM_API_KEY"] == "vllm-key"
     assert agent.env_vars["VLLM_SERVED_MODEL_NAME"] == "Qwen/Qwen3.6-35B-A3B-FP8"
     assert agent.env_vars["MODEL"] == "openai/Qwen/Qwen3.6-35B-A3B-FP8"
-    assert agent.env_vars["OPENCODE_PROVIDER_ID"] == "vllm"
+    assert agent.env_vars["OPENCODE_PROVIDER_ID"] == "localvllm"
 
 
 def test_registry_loads_modal_opencode_vllm_variants(monkeypatch) -> None:
@@ -219,16 +219,19 @@ def test_opencode_start_sh_writes_vllm_openai_compatible_config(tmp_path: Path) 
 
     assert completed.returncode == 0, completed.stderr + completed.stdout
     config = json.loads((agent_dir / "opencode.json").read_text(encoding="utf-8"))
-    provider = config["provider"]["vllm"]
+    provider = config["provider"]["localvllm"]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["options"]["baseURL"] == "{env:VLLM_API_BASE}"
     assert provider["options"]["apiKey"] == "{env:VLLM_API_KEY}"
+    assert "includeUsage" not in provider["options"]
     assert "Qwen/Qwen3.6-35B-A3B-FP8" in provider["models"]
+    assert provider["models"]["Qwen/Qwen3.6-35B-A3B-FP8"]["limit"] == {"context": 32000, "output": 1024, "input": 30976}
+    assert config["compaction"] == {"auto": True, "prune": True, "reserved": 4096}
     args = (logs_dir / "opencode-args.txt").read_text(encoding="utf-8")
-    assert "--model\nvllm/Qwen/Qwen3.6-35B-A3B-FP8\n" in args
+    assert "--model\nlocalvllm/Qwen/Qwen3.6-35B-A3B-FP8\n" in args
     trajectory = json.loads((logs_dir / "opencode" / "opencode.traj.json").read_text(encoding="utf-8"))
     assert trajectory["trajectory_format"] == "opencode-run-jsonl-v1"
-    assert trajectory["model"] == "vllm/Qwen/Qwen3.6-35B-A3B-FP8"
+    assert trajectory["model"] == "localvllm/Qwen/Qwen3.6-35B-A3B-FP8"
     assert trajectory["exit_code"] == 0
 
 
@@ -278,7 +281,7 @@ def test_opencode_start_sh_dry_run_validates_config_and_writes_submission(tmp_pa
     )
 
     assert completed.returncode == 0, completed.stderr + completed.stdout
-    assert "validated vllm/Qwen/Qwen3.6-35B-A3B-FP8" in completed.stdout
+    assert "validated localvllm/Qwen/Qwen3.6-35B-A3B-FP8" in completed.stdout
     submission = agent_dir / "submission" / "audit.md"
     assert submission.exists()
     assert "OpenCode Modal dry run" in submission.read_text(encoding="utf-8")

@@ -95,6 +95,9 @@ ENABLE_GPU_TELEMETRY = _env_bool("VLLM_ENABLE_GPU_TELEMETRY", False)
 GPU_TELEMETRY_INTERVAL_SECONDS = float(os.getenv("VLLM_GPU_TELEMETRY_INTERVAL_SECONDS", "1") or "1")
 ENABLE_TORCH_PROFILER = _env_bool("VLLM_ENABLE_TORCH_PROFILER", False)
 PROFILE_VOLUME_NAME = os.getenv("VLLM_PROFILE_VOLUME_NAME", DEFAULT_PROFILE_VOLUME_NAME).strip() or DEFAULT_PROFILE_VOLUME_NAME
+CHAT_TEMPLATE_MODE = os.getenv("VLLM_CHAT_TEMPLATE_MODE", "").strip()
+CODEX_COMPAT_CHAT_TEMPLATE_LOCAL = os.path.join(os.path.dirname(__file__), "templates", "qwen3_codex_compat.jinja")
+CODEX_COMPAT_CHAT_TEMPLATE_REMOTE = "/root/qwen3_codex_compat.jinja"
 
 _require_expensive_gpu_opt_in(GPU_CONFIG)
 
@@ -125,7 +128,8 @@ def _config_summary() -> str:
         f"gpu_telemetry={ENABLE_GPU_TELEMETRY} "
         f"gpu_telemetry_interval={GPU_TELEMETRY_INTERVAL_SECONDS} "
         f"torch_profiler={ENABLE_TORCH_PROFILER} "
-        f"profile_volume={PROFILE_VOLUME_NAME}"
+        f"profile_volume={PROFILE_VOLUME_NAME} "
+        f"chat_template_mode={CHAT_TEMPLATE_MODE or '-'}"
     )
 
 app = modal.App(APP_NAME)
@@ -151,6 +155,7 @@ image = (
             "VLLM_GPU_TELEMETRY_INTERVAL_SECONDS": str(GPU_TELEMETRY_INTERVAL_SECONDS),
             "VLLM_ENABLE_TORCH_PROFILER": "1" if ENABLE_TORCH_PROFILER else "0",
             "VLLM_PROFILE_VOLUME_NAME": PROFILE_VOLUME_NAME,
+            "VLLM_CHAT_TEMPLATE_MODE": CHAT_TEMPLATE_MODE,
             "VLLM_PROFILE_VOLUME_PATH": PROFILE_VOLUME_PATH,
             "VLLM_TORCH_PROFILER_DIR": TORCH_PROFILER_DIR,
             "VLLM_GPU_TELEMETRY_DIR": GPU_TELEMETRY_DIR,
@@ -179,6 +184,7 @@ image = (
             "VLLM_SCALEDOWN_WINDOW_SECONDS": str(SCALEDOWN_WINDOW_SECONDS),
         }
     )
+    .add_local_file(CODEX_COMPAT_CHAT_TEMPLATE_LOCAL, CODEX_COMPAT_CHAT_TEMPLATE_REMOTE)
 )
 
 
@@ -225,6 +231,10 @@ def build_vllm_command(api_key: str) -> list[str]:
         "--uvicorn-log-level",
         "warning",
     ]
+    if CHAT_TEMPLATE_MODE:
+        if CHAT_TEMPLATE_MODE != "qwen-codex-compat":
+            raise RuntimeError(f"Unsupported VLLM_CHAT_TEMPLATE_MODE={CHAT_TEMPLATE_MODE!r}.")
+        command.extend(["--chat-template", CODEX_COMPAT_CHAT_TEMPLATE_REMOTE])
     # vLLM 0.19 rejects these legacy serve flags; keep the values in the
     # container env/config summary, but do not pass them to `vllm serve`.
     if REASONING_PARSER:

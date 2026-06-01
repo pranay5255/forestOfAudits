@@ -2,7 +2,9 @@
 
 This runbook tracks direct-OpenAI `gpt-5.4` EVMBench runs through the
 OpenRouter-v1 wrapper. Use it to run the benchmark incrementally with both
-CLI harnesses without spending tokens on duplicate work.
+CLI harnesses without spending tokens on duplicate work. The wrapper path is
+now a generic provider runner, but the completed-task tracker below is
+historical direct-OpenAI coverage, not four-provider coverage.
 
 Use [audit-catalog-and-modes.md](audit-catalog-and-modes.md) for audit
 capabilities and mode membership. Dated result tables and usage notes are

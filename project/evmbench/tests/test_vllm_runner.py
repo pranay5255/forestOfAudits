@@ -111,6 +111,7 @@ def test_codex_start_sh_uses_vllm_chat_provider(tmp_path: Path) -> None:
             "VLLM_API_KEY": "vllm-key",
             "VLLM_SERVED_MODEL_NAME": "Qwen/Qwen3.6-35B-A3B-FP8",
             "MODEL": "openai/Qwen/Qwen3.6-35B-A3B-FP8",
+            "EVMBENCH_AGENT_PROMPT": "Run the codex tool smoke.",
         }
     )
     env.pop("OPENAI_API_KEY", None)
@@ -132,7 +133,10 @@ def test_codex_start_sh_uses_vllm_chat_provider(tmp_path: Path) -> None:
     assert 'model_providers.vllm.base_url="https://vllm.example.test/v1"' in args
     assert 'model_providers.vllm.env_key="VLLM_API_KEY"' in args
     assert 'model_providers.vllm.wire_api="responses"' in args
+    assert 'model_reasoning_summary="none"' in args
+    assert 'model_supports_reasoning_summaries=false' in args
     assert 'wire_api="chat"' not in args
+    assert "Run the codex tool smoke." in args
 
 
 

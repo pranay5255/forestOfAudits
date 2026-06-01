@@ -85,13 +85,25 @@ class EVMbenchSolver(PythonCodingSolver):
         default=10 * 3600,
         doc="Upper limit on agent runtime.",
     )
+    judge_model: str = chz.field(
+        default="gpt-5",
+        doc="Model used by EVMBench graders.",
+    )
+    judge_reasoning_effort: str = chz.field(
+        default="high",
+        doc="Reasoning effort used by EVMBench graders.",
+    )
     detect_iterations: int = chz.field(default=1)
     disable_internet: bool = chz.field(default=True)
     debug_local: bool = chz.field(default=False)
 
     @chz.init_property
     def runtime_config(self) -> EVMRuntimeConfig:
-        return EVMRuntimeConfig(agent_id=self.agent_id)
+        return EVMRuntimeConfig(
+            agent_id=self.agent_id,
+            judge_model=self.judge_model,
+            reasoning_effort=self.judge_reasoning_effort,
+        )
 
     def shortname(self) -> str:
         if self.agent_reasoning_effort:

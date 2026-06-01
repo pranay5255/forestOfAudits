@@ -292,7 +292,7 @@ VLLM_API_BASE=https://<workspace>--evmbench-vllm-qwen-serve.modal.run/v1
 VLLM_API_KEY=<redacted>
 VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8
 MODEL=openai/Qwen/Qwen3.6-35B-A3B-FP8
-OPENCODE_PROVIDER_ID=vllm
+OPENCODE_PROVIDER_ID=localvllm
 ```
 
 `start.sh` strips the `openai/` prefix, writes
@@ -300,7 +300,7 @@ OPENCODE_PROVIDER_ID=vllm
 
 ```bash
 opencode run \
-  --model vllm/Qwen/Qwen3.6-35B-A3B-FP8 \
+  --model localvllm/Qwen/Qwen3.6-35B-A3B-FP8 \
   --format json \
   "$PROMPT"
 ```
@@ -310,7 +310,7 @@ The generated provider uses environment references, not inline secrets:
 ```json
 {
   "provider": {
-    "vllm": {
+    "localvllm": {
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "{env:VLLM_API_BASE}",
@@ -324,13 +324,21 @@ The generated provider uses environment references, not inline secrets:
 
 For OpenCode, keep the vLLM output cap below the deployed context window. The
 OpenRouter-era cap of `1000000` causes vLLM to reject requests. Current
-OpenCode vLLM settings:
+OpenCode vLLM smoke defaults are intentionally conservative:
 
 ```text
-OPENCODE_PROVIDER_ID=vllm
-OPENCODE_VLLM_OUTPUT_TOKEN_MAX=4096
+OPENCODE_PROVIDER_ID=localvllm
+OPENCODE_VLLM_CONTEXT_TOKEN_MAX=32000
+OPENCODE_VLLM_INPUT_TOKEN_MAX=30976
+OPENCODE_VLLM_OUTPUT_TOKEN_MAX=1024
+OPENCODE_VLLM_COMPACTION_RESERVED=4096
 OPENCODE_AGENT_TIMEOUT_SECONDS=540
 ```
+
+These local defaults favor smoke reliability over audit quality while upstream
+OpenCode/vLLM behavior matures. Relevant upstream references are
+`anomalyco/opencode` issues #9611, #20078, #29363, #26412, #16488, and PR
+#24914.
 
 Model switching should update these together:
 
@@ -346,8 +354,8 @@ audit.
 ### OpenCode Ladder
 
 1. Verify endpoint health, `/v1/models`, chat, and tool calls.
-2. Validate that `opencode/start.sh` writes an OpenAI-compatible `vllm`
-   provider config and invokes `opencode run --model vllm/<served-model>`.
+2. Validate that `opencode/start.sh` writes an OpenAI-compatible `localvllm`
+   provider config and invokes `opencode run --model localvllm/<served-model>`.
 3. Run a single audit:
 
 ```bash
@@ -372,15 +380,11 @@ evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
   --stop-on-failure
 ```
 
-As of 2026-04-29, an OpenCode Modal vLLM check reached vLLM and wrote a
-complete one-event trajectory manifest, but failed later with:
-
-```text
-AI_InvalidResponseDataError: Expected 'function.name' to be a string.
-```
-
-Treat this as a tool-call compatibility failure until OpenCode runs past
-repeated tool calls and writes a non-placeholder `submission/audit.md`.
+The EVMBench compatibility gateway normalizes streamed tool-call deltas where
+OpenAI-compatible vLLM omits a repeated `function.name`. Treat any remaining
+`function.name` or tool-call protocol exception as a provider/protocol failure
+until OpenCode runs past repeated tool calls and writes a non-placeholder
+`submission/audit.md`.
 
 ## Failure Interpretation
 

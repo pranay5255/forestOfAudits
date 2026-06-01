@@ -442,10 +442,16 @@ Deploy and verify the endpoint:
 uv run python -m evmbench.vllm deploy --write-env
 ```
 
+Deploy the compatibility gateway in front of that raw vLLM endpoint and rewrite `VLLM_API_BASE` to the gateway while preserving the raw endpoint as `VLLM_UPSTREAM_API_BASE`:
+
+```bash
+uv run python -m evmbench.vllm deploy-gateway --upstream-api-base "$VLLM_API_BASE" --write-env
+```
+
 Use a single H100 with the FP8 checkpoint explicitly:
 
 ```bash
-uv run python -m evmbench.vllm deploy --gpu H100 --write-env
+uv run python -m evmbench.vllm deploy --gpu H100 --chat-template-mode qwen-codex-compat --write-env
 ```
 
 Use two H100s with an explicit opt-in:
@@ -459,6 +465,12 @@ Verify an already deployed endpoint without redeploying:
 
 ```bash
 uv run python -m evmbench.vllm verify
+```
+
+Validate parser and tool-call compatibility before running an agent harness. This writes raw request/response artifacts plus `compatibility-summary.json` under `runs/vllm-compat/` and fails if Chat Completions tool calls or the Responses API probe do not pass:
+
+```bash
+uv run python -m evmbench.vllm compat-smoke
 ```
 
 Collect one raw Prometheus metrics snapshot from `/metrics`:
@@ -486,6 +498,12 @@ Supported direct harnesses are `codex`, `opencode`, and `mini-swe-agent`, which
 map to `codex-qwen-vllm`, `opencode-qwen-vllm`, and
 `mini-swe-agent-qwen-vllm`. This path does not use `modal_forest`, forest
 scouts, forest judges, or Phase 6 forest wrappers.
+
+OpenCode vLLM smoke defaults are intentionally conservative: the wrapper
+declares a 32K context window, caps output at 1024 tokens, reserves 4096 tokens
+for compaction, and lets OpenCode receive usage data. This avoids known local
+vLLM/OpenAI-compatible edge cases tracked upstream in `anomalyco/opencode`
+#9611, #20078, #29363, #26412, #16488, and PR #24914.
 
 For open-model experiments, including the canonical Qwen3.6-27B 8xH100
 long-context command with YaRN, GPU telemetry, and Torch profiling, see

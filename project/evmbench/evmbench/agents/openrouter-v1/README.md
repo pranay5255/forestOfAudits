@@ -1,7 +1,15 @@
-# OpenRouter V1 Experiment
+# Provider V1 Experiment
 
-This experiment is intentionally self-contained. It registers only these agent
-IDs and leaves the default Codex/OpenCode agents unchanged:
+This runner keeps the historical `openrouter-v1` path and artifact filenames,
+but it now runs EVMBench tasks against four provider modes:
+
+- `openrouter`
+- `openai`
+- `vllm`
+- `azure-foundry`
+
+It registers only these agent IDs and leaves the default Codex/OpenCode agents
+unchanged:
 
 - `codex-openrouter-v1`
 - `opencode-openrouter-v1`
@@ -24,29 +32,44 @@ If Docker build networking is flaky, include:
   --build-network host
 ```
 
-The printed commands build `ploit-builder:latest`, the EVMBench base image, and
-one `evmbench/audit:<audit_id>` image per selected audit.
+## Provider Setup
 
-## Run
+The wrapper always loads `.env` when present. For `--provider azure-foundry`,
+it also loads `.env.azure` and aliases the Azure file without rewriting it:
 
-Set `OPENROUTER_API_KEY` in `.env` or in the shell. The wrapper loads `.env`.
-OpenRouter is the default provider, so existing commands do not need a provider
-flag.
+```text
+API_KEY -> AZURE_FOUNDRY_API_KEY
+PROJ_ENPOINT or PROJ_ENDPOINT -> AZURE_FOUNDRY_BASE_URL
+BASE_ENDPOINT -> AZURE_FOUNDRY_PROJECT_ENDPOINT
+```
+
+Provider defaults:
+
+| Provider | Required key | Default base URL |
+| --- | --- | --- |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+| `vllm` | `VLLM_API_KEY` | `VLLM_API_BASE` |
+| `azure-foundry` | `AZURE_FOUNDRY_API_KEY` | `.env.azure` `PROJ_ENPOINT` |
+
+Azure Foundry should use the `/openai/v1` endpoint in `PROJ_ENPOINT`, not the
+project-scoped `BASE_ENDPOINT`.
+
+## Examples
+
+OpenRouter keeps provider-qualified model slugs:
 
 ```bash
 evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
-  --tasks detect:2024-01-canto,patch:2024-01-curves,exploit:2023-10-nextgen \
+  --provider openrouter \
+  --tasks detect:2024-01-canto \
   --harnesses codex,opencode \
-  --model anthropic/claude-sonnet-4.5 \
-  --model google/gemini-3-pro-preview \
-  --base-url https://openrouter.ai/api/v1 \
-  --output-root runs/openrouter-v1/mixed-3 \
-  --agent-timeout-seconds 14400 \
-  --stop-on-failure
+  --model openai/gpt-5-nano \
+  --agent-timeout-seconds 600 \
+  --item-timeout-seconds 900
 ```
 
-To run direct OpenAI models instead, set `OPENAI_API_KEY` and pass
-`--provider openai`. The default base URL becomes `https://api.openai.com/v1`.
+Direct OpenAI uses unqualified OpenAI model IDs:
 
 ```bash
 evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
@@ -55,53 +78,69 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model gpt-5-nano \
   --agent-timeout-seconds 600 \
+  --item-timeout-seconds 900
+```
+
+vLLM defaults its base URL from `VLLM_API_BASE`:
+
+```bash
+evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
+  --provider vllm \
+  --tasks detect:2024-01-canto \
+  --harnesses codex,opencode \
+  --model Qwen/Qwen3.6-27B \
+  --output-root runs/provider-v1/vllm-smoke \
+  --agent-timeout-seconds 600 \
+  --item-timeout-seconds 900
+```
+
+Azure Foundry defaults its smoke model to `gpt-4.1-nano` if `--model` is omitted:
+
+```bash
+evmbench/agents/openrouter-v1/run_openrouter_v1.sh plan \
+  --provider azure-foundry \
+  --tasks detect:2024-01-canto \
+  --harnesses codex,opencode \
+  --output-root runs/provider-v1/azure-foundry-smoke-plan
+```
+
+A real Azure Foundry smoke with both harnesses:
+
+```bash
+evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
+  --provider azure-foundry \
+  --tasks detect:2024-01-canto \
+  --harnesses codex,opencode \
+  --model gpt-4.1-nano \
+  --output-root runs/provider-v1/azure-foundry-smoke-gpt-4.1-nano \
+  --agent-timeout-seconds 600 \
   --item-timeout-seconds 900 \
   --stop-on-failure
 ```
 
-For a low-cost startup smoke, use `gpt-5-nano`. For the same task set as the
-two-audit detect smoke, keep the model cheap until both wrappers produce
-non-empty submissions:
+## Azure Foundry Smoke
+
+Before running EVMBench, verify the Azure endpoint with the `.env.azure` values:
 
 ```bash
-evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
-  --provider openai \
-  --tasks detect:2024-01-canto,detect:2024-01-curves \
-  --harnesses codex,opencode \
-  --model gpt-5-nano \
-  --output-root runs/openrouter-v1/openai-smoke-gpt-5-nano \
-  --agent-timeout-seconds 1800 \
-  --item-timeout-seconds 2400
+. ./.env.azure
+curl -sS \
+  -H "Authorization: Bearer $API_KEY" \
+  "${PROJ_ENPOINT%/}/models"
 ```
 
-Useful direct-OpenAI variants:
+Then verify a minimal Responses request returns non-empty text:
 
 ```bash
-# Cheapest wrapper check.
---provider openai --model gpt-5-nano
-
-# Stronger low-cost check.
---provider openai --model gpt-5-mini
-
-# Current cheaper GPT-5.4-class check.
---provider openai --model gpt-5.4-nano
-
-# Frontier comparison.
---provider openai --model gpt-5.4
+. ./.env.azure
+curl -sS \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  "${PROJ_ENPOINT%/}/responses" \
+  -d '{"model":"gpt-4.1-nano","input":"Reply with evmbench-ok."}'
 ```
 
-For OpenRouter, keep the provider prefix in the model slug:
-
-```bash
-# Cheap OpenRouter route to OpenAI.
---provider openrouter --model openai/gpt-5-nano
-
-# Stronger OpenRouter route to OpenAI.
---provider openrouter --model openai/gpt-5-mini
-
-# Non-OpenAI OpenRouter sanity check.
---provider openrouter --model anthropic/claude-haiku-4.5
-```
+## Outputs
 
 Outputs are written under the selected output root:
 

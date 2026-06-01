@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from evmbench.vllm import deploy, metrics, runner, setup_env
+from evmbench.vllm import compat, deploy, gateway_deploy, metrics, runner, setup_env
 from evmbench.vllm.common import fail, load_project_env, require_env, verify_vllm_endpoint
 
 
@@ -14,6 +14,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("deploy", help="Deploy and verify the Modal vLLM endpoint.")
+    subparsers.add_parser("deploy-gateway", help="Deploy the Modal vLLM compatibility gateway.")
     subparsers.add_parser("setup-env", help="Write local vLLM env values and sync Modal secret.")
 
     verify = subparsers.add_parser("verify", help="Verify health, models, and chat completion.")
@@ -28,6 +29,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("metrics", help="Use `python -m evmbench.vllm metrics ...` for metrics commands.")
     subparsers.add_parser("run-harness", help="Run one direct vLLM-backed EVMBench harness task.")
+    subparsers.add_parser("compat-smoke", help="Verify vLLM tool-call and Responses API compatibility.")
     return parser
 
 
@@ -35,12 +37,16 @@ def main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args[:1] == ["deploy"]:
         return deploy.main(raw_args[1:])
+    if raw_args[:1] == ["deploy-gateway"]:
+        return gateway_deploy.main(raw_args[1:])
     if raw_args[:1] == ["setup-env"]:
         return setup_env.main(raw_args[1:])
     if raw_args[:1] == ["metrics"]:
         return metrics.main(raw_args[1:] or ["snapshot"])
     if raw_args[:1] == ["run-harness"]:
         return runner.main(raw_args[1:])
+    if raw_args[:1] == ["compat-smoke"]:
+        return compat.main(raw_args[1:])
 
     parser = build_arg_parser()
     args = parser.parse_args(raw_args)

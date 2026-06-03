@@ -289,13 +289,22 @@ class EVMbenchSolver(PythonCodingSolver):
             f"{AGENT_DIR}/{agent.instruction_file_name}",
         )
 
-        # We only wrap start.sh when we need to inject runtime env (e.g. RPC override).
+        # Wrap start.sh when we need to inject task-scoped runtime env.
         # Gateway host routing is configured via `send_shell_command` (not via wrapper).
+        start_env = {
+            "EVMBENCH_TASK_MODE": task.mode,
+            "EVMBENCH_AUDIT_ID": task.audit.id,
+            "EVMBENCH_AUDIT_BASE_COMMIT": task.audit.base_commit or "",
+        }
         if agent_rpc_override:
             agent_rpc_url = task.get_agent_rpc_url()
             start_lines = [
                 "#!/bin/bash",
                 "set -euo pipefail",
+                *[
+                    f"export {name}={shlex.quote(value)}"
+                    for name, value in start_env.items()
+                ],
                 f"export RPC_URL={shlex.quote(agent_rpc_url)}",
                 f"export EXPLOIT_CHAIN_BASE_URL={shlex.quote(agent_rpc_override[0])}",
                 f"export EXPLOIT_CHAIN_RPC_PORT={shlex.quote(str(agent_rpc_override[1]))}",
@@ -309,7 +318,22 @@ class EVMbenchSolver(PythonCodingSolver):
                 put_text_in_computer(computer, start_script, f"{AGENT_DIR}/start.sh"),
             )
         else:
-            await put_file_in_computer(computer, agent.start_sh, f"{AGENT_DIR}/start.sh")
+            start_lines = [
+                "#!/bin/bash",
+                "set -euo pipefail",
+                *[
+                    f"export {name}={shlex.quote(value)}"
+                    for name, value in start_env.items()
+                ],
+                f"exec bash {shlex.quote(f'{AGENT_DIR}/start.original.sh')}",
+            ]
+            start_script = "\n".join(start_lines) + "\n"
+            await asyncio.gather(
+                put_file_in_computer(
+                    computer, agent.start_sh, f"{AGENT_DIR}/start.original.sh"
+                ),
+                put_text_in_computer(computer, start_script, f"{AGENT_DIR}/start.sh"),
+            )
 
     async def _configure_container_network(
         self,

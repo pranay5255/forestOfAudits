@@ -40,6 +40,9 @@ for name in \
     OPENCODE_MODEL \
     OPENCODE_DRY_RUN \
     OPENCODE_AGENT_TIMEOUT_SECONDS \
+    EVMBENCH_TASK_MODE \
+    EVMBENCH_AUDIT_ID \
+    EVMBENCH_AUDIT_BASE_COMMIT \
     OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX \
     OPENCODE_VLLM_CONTEXT_TOKEN_MAX \
     OPENCODE_VLLM_COMPACTION_RESERVED \
@@ -254,7 +257,6 @@ server.serve_forever()
 PY
     OPENCODE_AZURE_COMPAT_PROXY_PID="$!"
     export OPENCODE_AZURE_COMPAT_PROXY_PID
-    trap 'if [[ -n "${OPENCODE_AZURE_COMPAT_PROXY_PID:-}" ]]; then kill "$OPENCODE_AZURE_COMPAT_PROXY_PID" 2>/dev/null || true; fi' EXIT
     for _ in $(seq 1 50); do
         if wait_for_local_port "$OPENCODE_AZURE_COMPAT_PROXY_PORT" 2>/dev/null; then
             return 0
@@ -271,9 +273,19 @@ OPENCODE_EVENTS_PATH="$OPENCODE_TRACE_DIR/opencode-run.jsonl"
 OPENCODE_STDERR_PATH="$OPENCODE_TRACE_DIR/opencode-stderr.log"
 OPENCODE_TRAJ_PATH="$OPENCODE_TRACE_DIR/opencode.traj.json"
 OPENCODE_MANIFEST_PATH="$OPENCODE_TRACE_DIR/trajectory-manifest.json"
+OPENCODE_STATUS_PATH="$OPENCODE_TRACE_DIR/status.json"
 OPENCODE_STATE_DIR="$OPENCODE_TRACE_DIR/state"
+OPENCODE_DETECT_SEED_PATH="$OPENCODE_TRACE_DIR/detect-seed.md"
 mkdir -p "$OPENCODE_TRACE_DIR"
-export OPENCODE_TRACE_DIR OPENCODE_EVENTS_PATH OPENCODE_STDERR_PATH OPENCODE_TRAJ_PATH OPENCODE_MANIFEST_PATH OPENCODE_STATE_DIR
+export OPENCODE_TRACE_DIR OPENCODE_EVENTS_PATH OPENCODE_STDERR_PATH OPENCODE_TRAJ_PATH OPENCODE_MANIFEST_PATH OPENCODE_STATUS_PATH OPENCODE_STATE_DIR OPENCODE_DETECT_SEED_PATH
+
+OPENCODE_FINALIZED=0
+OPENCODE_REAL_EXIT_CODE=0
+OPENCODE_EFFECTIVE_EXIT_CODE=0
+OPENCODE_SUBMISSION_PATH=""
+OPENCODE_SUBMISSION_FALLBACK=0
+OPENCODE_SUBMISSION_FALLBACK_REASON=""
+export OPENCODE_FINALIZED OPENCODE_REAL_EXIT_CODE OPENCODE_EFFECTIVE_EXIT_CODE OPENCODE_SUBMISSION_PATH OPENCODE_SUBMISSION_FALLBACK OPENCODE_SUBMISSION_FALLBACK_REASON
 
 collect_opencode_state() {
     python3 - <<'PY'
@@ -368,6 +380,9 @@ payload = {
     "api_key_env_var": os.environ.get("EVMBENCH_LLM_API_KEY_ENV"),
     "openrouter_base_url": os.environ.get("OPENROUTER_BASE_URL"),
     "exit_code": int(os.environ.get("OPENCODE_EXIT_CODE", "0")),
+    "effective_exit_code": int(os.environ.get("OPENCODE_EFFECTIVE_EXIT_CODE", os.environ.get("OPENCODE_EXIT_CODE", "0"))),
+    "task_mode": os.environ.get("EVMBENCH_TASK_MODE"),
+    "audit_id": os.environ.get("EVMBENCH_AUDIT_ID"),
     "dry_run": os.environ.get("OPENCODE_TRACE_DRY_RUN", "").lower() in {"1", "true", "yes", "on"},
     "timeout_seconds": int(os.environ["OPENCODE_TRACE_TIMEOUT_SECONDS"])
     if os.environ.get("OPENCODE_TRACE_TIMEOUT_SECONDS")
@@ -376,10 +391,18 @@ payload = {
     "event_count": len(events),
     "json_event_count": json_events,
     "stderr_bytes": stderr_bytes,
+    "submission": {
+        "path": os.environ.get("OPENCODE_SUBMISSION_PATH") or None,
+        "fallback": os.environ.get("OPENCODE_SUBMISSION_FALLBACK", "0") == "1",
+        "fallback_reason": os.environ.get("OPENCODE_SUBMISSION_FALLBACK_REASON") or None,
+    },
     "files": {
         "events_jsonl": rel(events_path),
         "stderr": rel(stderr_path),
         "state_index": rel(state_index_path) if state_index_path.exists() else None,
+        "status": rel(Path(os.environ["OPENCODE_STATUS_PATH"]))
+        if os.environ.get("OPENCODE_STATUS_PATH")
+        else None,
     },
 }
 traj_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -398,6 +421,7 @@ from pathlib import Path
 trace_dir = Path(os.environ["OPENCODE_TRACE_DIR"])
 traj_path = Path(os.environ["OPENCODE_TRAJ_PATH"])
 manifest_path = Path(os.environ["OPENCODE_MANIFEST_PATH"])
+status_path = Path(os.environ["OPENCODE_STATUS_PATH"])
 
 
 def rel(path: Path) -> str:
@@ -425,6 +449,8 @@ payload = {
     "agent": "opencode",
     "provider": os.environ.get("provider_id"),
     "model": os.environ.get("run_model"),
+    "task_mode": os.environ.get("EVMBENCH_TASK_MODE"),
+    "audit_id": os.environ.get("EVMBENCH_AUDIT_ID"),
     "expected_trajectory_count": 1,
     "found_trajectory_count": 1 if trajectory_exists else 0,
     "missing_trajectory_count": 0 if trajectory_exists else 1,
@@ -442,14 +468,239 @@ payload = {
             "trajectory_sha256": sha256_file(traj_path),
             "worker_error": None if trajectory_exists else "missing OpenCode trajectory",
             "returncode": int(os.environ.get("OPENCODE_EXIT_CODE", "0")),
+            "effective_returncode": int(os.environ.get("OPENCODE_EFFECTIVE_EXIT_CODE", os.environ.get("OPENCODE_EXIT_CODE", "0"))),
         }
     ],
+    "submission": {
+        "path": os.environ.get("OPENCODE_SUBMISSION_PATH") or None,
+        "fallback": os.environ.get("OPENCODE_SUBMISSION_FALLBACK", "0") == "1",
+        "fallback_reason": os.environ.get("OPENCODE_SUBMISSION_FALLBACK_REASON") or None,
+    },
+    "status_path": rel(status_path),
+    "status_exists": status_path.exists(),
     "run_error": None
     if os.environ.get("OPENCODE_EXIT_CODE", "0") == "0"
     else f"opencode exited {os.environ.get('OPENCODE_EXIT_CODE')}",
 }
 manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
+}
+
+is_timeout_status() {
+    local status="$1"
+    [[ -n "${OPENCODE_AGENT_TIMEOUT_SECONDS:-}" && "$status" =~ ^(124|130|137|143)$ ]]
+}
+
+submission_filename_for_mode() {
+    case "${EVMBENCH_TASK_MODE:-detect}" in
+        detect) printf 'audit.md\n' ;;
+        patch) printf 'agent.diff\n' ;;
+        exploit) printf 'txs.json\n' ;;
+        *) printf 'audit.md\n' ;;
+    esac
+}
+
+mark_submission_fallback() {
+    local reason="$1"
+    OPENCODE_SUBMISSION_FALLBACK=1
+    if [[ -z "${OPENCODE_SUBMISSION_FALLBACK_REASON:-}" ]]; then
+        OPENCODE_SUBMISSION_FALLBACK_REASON="$reason"
+    elif [[ "$OPENCODE_SUBMISSION_FALLBACK_REASON" != *"$reason"* ]]; then
+        OPENCODE_SUBMISSION_FALLBACK_REASON="${OPENCODE_SUBMISSION_FALLBACK_REASON}; ${reason}"
+    fi
+    export OPENCODE_SUBMISSION_FALLBACK OPENCODE_SUBMISSION_FALLBACK_REASON
+}
+
+seed_initial_submission() {
+    mkdir -p "$SUBMISSION_DIR"
+    case "${EVMBENCH_TASK_MODE:-detect}" in
+        detect)
+            cat > "$OPENCODE_DETECT_SEED_PATH" <<EOF
+# OpenCode detect run in progress
+
+Audit: ${EVMBENCH_AUDIT_ID:-unknown}
+Model: ${run_model:-unknown}
+
+OpenCode has started. If this marker remains unchanged, the harness will replace it with a diagnostic fallback report.
+EOF
+            if [[ ! -e "$SUBMISSION_DIR/audit.md" ]]; then
+                cp "$OPENCODE_DETECT_SEED_PATH" "$SUBMISSION_DIR/audit.md"
+            fi
+            ;;
+        exploit)
+            if [[ ! -s "$SUBMISSION_DIR/txs.json" ]]; then
+                printf '{\n  "transactions": []\n}\n' > "$SUBMISSION_DIR/txs.json"
+            fi
+            ;;
+    esac
+}
+
+write_manual_patch_fallback_diff() {
+    cat > "$SUBMISSION_DIR/agent.diff" <<'EOF'
+diff --git a/.evmbench-opencode-fallback.txt b/.evmbench-opencode-fallback.txt
+new file mode 100644
+--- /dev/null
++++ b/.evmbench-opencode-fallback.txt
+@@ -0,0 +1,4 @@
++OpenCode did not leave a non-empty patch diff before finalization.
++This file was added by the EVMBench OpenCode harness so submission/agent.diff is non-empty.
++The run should be treated as a harness fallback, not as a model-generated fix.
++See logs/opencode/status.json for the real OpenCode exit status.
+EOF
+}
+
+finalize_submission_artifact() {
+    local real_status="$1"
+    local mode="${EVMBENCH_TASK_MODE:-detect}"
+    local filename
+    filename="$(submission_filename_for_mode)"
+    OPENCODE_SUBMISSION_PATH="$SUBMISSION_DIR/$filename"
+    export OPENCODE_SUBMISSION_PATH
+    mkdir -p "$SUBMISSION_DIR"
+
+    case "$mode" in
+        detect)
+            if [[ ! -s "$OPENCODE_SUBMISSION_PATH" ]] || cmp -s "$OPENCODE_SUBMISSION_PATH" "$OPENCODE_DETECT_SEED_PATH" 2>/dev/null; then
+                if is_timeout_status "$real_status"; then
+                    mark_submission_fallback "opencode timed out before writing audit.md"
+                else
+                    mark_submission_fallback "opencode finished without writing audit.md"
+                fi
+                cat > "$OPENCODE_SUBMISSION_PATH" <<EOF
+# OpenCode fallback audit report
+
+Audit: ${EVMBENCH_AUDIT_ID:-unknown}
+Mode: detect
+Model: ${run_model:-unknown}
+OpenCode exit code: ${real_status}
+Timeout seconds: ${OPENCODE_AGENT_TIMEOUT_SECONDS:-unset}
+
+OpenCode did not leave a final audit report before harness finalization. This diagnostic report is a forced submission artifact so the run output is complete. Treat this as fallback output, not as a vulnerability finding.
+
+See logs/opencode/status.json, logs/opencode/opencode.traj.json, and logs/opencode/opencode-run.jsonl for the collected run state.
+EOF
+            fi
+            ;;
+        patch)
+            local base_commit="${EVMBENCH_AUDIT_BASE_COMMIT:-}"
+            if [[ -z "$base_commit" ]]; then
+                base_commit="$(git -C "$AUDIT_DIR" rev-parse HEAD 2>/dev/null || true)"
+            fi
+            if [[ -n "$base_commit" ]]; then
+                (
+                    cd "$AUDIT_DIR"
+                    git add -N . >/dev/null 2>&1 || true
+                    git -c core.fileMode=false diff --binary "$base_commit" > "$OPENCODE_SUBMISSION_PATH"
+                ) || true
+            fi
+            if [[ ! -s "$OPENCODE_SUBMISSION_PATH" ]]; then
+                if is_timeout_status "$real_status"; then
+                    mark_submission_fallback "opencode timed out before producing a patch diff"
+                else
+                    mark_submission_fallback "opencode finished without producing a patch diff"
+                fi
+                cat > "$AUDIT_DIR/.evmbench-opencode-fallback.txt" <<EOF
+OpenCode did not leave a non-empty patch diff before finalization.
+This file was added by the EVMBench OpenCode harness so submission/agent.diff is non-empty.
+The run should be treated as a harness fallback, not as a model-generated fix.
+See logs/opencode/status.json for the real OpenCode exit status.
+EOF
+                if [[ -n "$base_commit" ]]; then
+                    (
+                        cd "$AUDIT_DIR"
+                        git add -N . >/dev/null 2>&1 || true
+                        git -c core.fileMode=false diff --binary "$base_commit" > "$OPENCODE_SUBMISSION_PATH"
+                    ) || true
+                fi
+                if [[ ! -s "$OPENCODE_SUBMISSION_PATH" ]]; then
+                    write_manual_patch_fallback_diff
+                fi
+            fi
+            ;;
+        exploit)
+            if [[ ! -s "$OPENCODE_SUBMISSION_PATH" ]]; then
+                mark_submission_fallback "opencode finished without exploit transactions"
+                printf '{\n  "transactions": []\n}\n' > "$OPENCODE_SUBMISSION_PATH"
+            fi
+            ;;
+        *)
+            if [[ ! -s "$OPENCODE_SUBMISSION_PATH" ]]; then
+                mark_submission_fallback "unsupported task mode fallback"
+                printf '# OpenCode fallback submission\n\nUnsupported EVMBench task mode: `%s`.\n' "$mode" > "$OPENCODE_SUBMISSION_PATH"
+            fi
+            ;;
+    esac
+}
+
+write_opencode_status_file() {
+    local real_status="$1"
+    local effective_status="$2"
+    export OPENCODE_REAL_EXIT_CODE="$real_status"
+    export OPENCODE_EFFECTIVE_EXIT_CODE="$effective_status"
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+submission_path = Path(os.environ["OPENCODE_SUBMISSION_PATH"]) if os.environ.get("OPENCODE_SUBMISSION_PATH") else None
+payload = {
+    "agent": "opencode",
+    "provider": os.environ.get("provider_id"),
+    "model": os.environ.get("run_model"),
+    "model_id": os.environ.get("model_id"),
+    "task_mode": os.environ.get("EVMBENCH_TASK_MODE"),
+    "audit_id": os.environ.get("EVMBENCH_AUDIT_ID"),
+    "audit_base_commit": os.environ.get("EVMBENCH_AUDIT_BASE_COMMIT"),
+    "real_exit_code": int(os.environ.get("OPENCODE_REAL_EXIT_CODE", "0")),
+    "effective_exit_code": int(os.environ.get("OPENCODE_EFFECTIVE_EXIT_CODE", "0")),
+    "timeout_seconds": int(os.environ["OPENCODE_AGENT_TIMEOUT_SECONDS"])
+    if os.environ.get("OPENCODE_AGENT_TIMEOUT_SECONDS")
+    else None,
+    "timed_out": os.environ.get("OPENCODE_REAL_EXIT_CODE") in {"124", "130", "137", "143"}
+    and bool(os.environ.get("OPENCODE_AGENT_TIMEOUT_SECONDS")),
+    "submission_path": str(submission_path) if submission_path else None,
+    "submission_exists": bool(submission_path and submission_path.exists()),
+    "submission_bytes": submission_path.stat().st_size if submission_path and submission_path.exists() else 0,
+    "submission_fallback": os.environ.get("OPENCODE_SUBMISSION_FALLBACK", "0") == "1",
+    "submission_fallback_reason": os.environ.get("OPENCODE_SUBMISSION_FALLBACK_REASON") or None,
+    "events_path": os.environ.get("OPENCODE_EVENTS_PATH"),
+    "stderr_path": os.environ.get("OPENCODE_STDERR_PATH"),
+    "trajectory_path": os.environ.get("OPENCODE_TRAJ_PATH"),
+}
+Path(os.environ["OPENCODE_STATUS_PATH"]).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+cleanup_opencode_processes() {
+    if [[ -n "${OPENCODE_AZURE_COMPAT_PROXY_PID:-}" ]]; then
+        kill "$OPENCODE_AZURE_COMPAT_PROXY_PID" 2>/dev/null || true
+    fi
+}
+
+finalize_opencode_run() {
+    local real_status="${1:-0}"
+    local effective_status="${2:-$real_status}"
+    if [[ "${OPENCODE_FINALIZED:-0}" == "1" ]]; then
+        cleanup_opencode_processes
+        return 0
+    fi
+    OPENCODE_FINALIZED=1
+    OPENCODE_REAL_EXIT_CODE="$real_status"
+    OPENCODE_EFFECTIVE_EXIT_CODE="$effective_status"
+    export OPENCODE_FINALIZED OPENCODE_REAL_EXIT_CODE OPENCODE_EFFECTIVE_EXIT_CODE
+
+    set +e
+    touch "$OPENCODE_EVENTS_PATH" "$OPENCODE_STDERR_PATH"
+    {
+        cat "$OPENCODE_EVENTS_PATH" 2>/dev/null || true
+        cat "$OPENCODE_STDERR_PATH" 2>/dev/null || true
+    } > "$LOGS_DIR/agent.log"
+    finalize_submission_artifact "$real_status"
+    write_opencode_status_file "$real_status" "$effective_status"
+    collect_opencode_state || true
+    write_opencode_trajectory_summary "$real_status" || true
+    write_opencode_trajectory_manifest "$real_status" || true
+    cleanup_opencode_processes
 }
 
 LLM_PROVIDER="${EVMBENCH_LLM_PROVIDER:-${OPENCODE_PROVIDER_ID:-openrouter}}"
@@ -528,7 +779,10 @@ fi
 provider_id="$LLM_PROVIDER"
 model_id="${OPENCODE_MODEL_ID:-${EVMBENCH_LLM_MODEL}}"
 run_model="${OPENCODE_MODEL:-${provider_id}/${model_id}}"
-export MODEL_OPTIONS provider_id model_id run_model
+EVMBENCH_TASK_MODE="${EVMBENCH_TASK_MODE:-detect}"
+EVMBENCH_AUDIT_ID="${EVMBENCH_AUDIT_ID:-unknown}"
+EVMBENCH_AUDIT_BASE_COMMIT="${EVMBENCH_AUDIT_BASE_COMMIT:-}"
+export MODEL_OPTIONS provider_id model_id run_model EVMBENCH_TASK_MODE EVMBENCH_AUDIT_ID EVMBENCH_AUDIT_BASE_COMMIT
 
 {
     echo "$LLM_API_KEY_ENV is set (redacted, length=${#LLM_API_KEY})"
@@ -537,6 +791,9 @@ export MODEL_OPTIONS provider_id model_id run_model
     echo "OpenCode provider: ${provider_id}"
     echo "OpenCode model id: ${model_id}"
     echo "Model options: ${MODEL_OPTIONS}"
+    echo "EVMBench task mode: ${EVMBENCH_TASK_MODE}"
+    echo "EVMBench audit id: ${EVMBENCH_AUDIT_ID}"
+    echo "EVMBench audit base commit: ${EVMBENCH_AUDIT_BASE_COMMIT:-unset}"
 } 2>&1 | tee "$LOGS_DIR/debug.log"
 
 python3 - <<'PY'
@@ -601,6 +858,18 @@ if provider_id == "vllm":
 PY
 
 export OPENCODE_CONFIG="$AGENT_DIR/opencode.json"
+seed_initial_submission
+
+handle_opencode_exit() {
+    local status="$?"
+    local effective_status="$status"
+    if is_timeout_status "$status"; then
+        effective_status=0
+    fi
+    finalize_opencode_run "$status" "$effective_status"
+    exit "$effective_status"
+}
+trap handle_opencode_exit EXIT
 
 if [[ "${OPENCODE_DRY_RUN:-0}" == "1" || "${OPENCODE_DRY_RUN:-}" == "true" ]]; then
     {
@@ -647,11 +916,9 @@ Path(os.environ["OPENCODE_EVENTS_PATH"]).write_text(
 )
 Path(os.environ["OPENCODE_STDERR_PATH"]).write_text("", encoding="utf-8")
 PY
-        collect_opencode_state
-        write_opencode_trajectory_summary 0
-        write_opencode_trajectory_manifest 0
         printf '# OpenCode %s v1 dry run\n\nConfigured `%s` successfully.\n' "$LLM_PROVIDER" "$run_model" > "$SUBMISSION_DIR/audit.md"
         test -s "$SUBMISSION_DIR/audit.md"
+        finalize_opencode_run 0 0
     } 2>&1 | tee "$LOGS_DIR/agent.log"
     exit 0
 fi
@@ -688,18 +955,14 @@ set +e
 opencode_status=$?
 set -e
 
-{
-    cat "$OPENCODE_EVENTS_PATH" 2>/dev/null || true
-    cat "$OPENCODE_STDERR_PATH" 2>/dev/null || true
-} > "$LOGS_DIR/agent.log"
-collect_opencode_state || true
-write_opencode_trajectory_summary "$opencode_status" || true
-write_opencode_trajectory_manifest "$opencode_status" || true
+effective_opencode_status="$opencode_status"
 
 if [[ -n "${OPENCODE_AGENT_TIMEOUT_SECONDS:-}" && "$opencode_status" =~ ^(124|130|137|143)$ ]]; then
     echo "OpenCode bounded run ended with status $opencode_status; preserving partial trajectory." 2>&1 | tee -a "$LOGS_DIR/debug.log"
-    opencode_status=0
+    effective_opencode_status=0
 fi
+
+finalize_opencode_run "$opencode_status" "$effective_opencode_status"
 
 {
     echo "$MODEL"
@@ -709,4 +972,4 @@ fi
     ls "$LOGS_DIR"
 } 2>&1 | tee -a "$LOGS_DIR/debug.log" || true
 
-exit "$opencode_status"
+exit "$effective_opencode_status"

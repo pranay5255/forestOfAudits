@@ -46,6 +46,15 @@ process left under the pane shell. The two direct-OpenAI `gpt-5.4` sessions are
 valid tracker inputs. The Owl Alpha session is a provider/model comparison run
 and must not be counted as `gpt-5.4` coverage.
 
+June 3 cleanup status:
+
+- The May tmux sessions `evmbenchDetectOnly`, `evmbenchBlackholeAudit`, and
+  `evmbench-owl-alpha` were completed, idle, and cleaned up.
+- The June 1 Azure/Codex provider-v1 batch is no longer a live tmux session.
+- The Azure Foundry batch stays separate from direct-OpenAI tracker coverage.
+  Count its rows as previous local overlap when choosing future tasks, but do
+  not mark them as direct-OpenAI `gpt-5.4` coverage.
+
 | Tmux session | Output root | Provider/model | Scope | Result | Interpretation |
 | --- | --- | --- | --- | ---: | --- |
 | `evmbenchDetectOnly` | `runs/openrouter-v1/openai-gpt-5.4-sample-detect-only-small` | `openai` / `gpt-5.4` | Detect-only, 3 audits, Codex + OpenCode | 4/6 | Useful quality signal; OpenCode found all three target findings. |
@@ -240,31 +249,36 @@ Coverage legend:
 
 ## Timeout Choice
 
-Use the bounded timeout pair for first-pass sampling:
+Use short bounded timeouts only for smoke tests that are expected to produce
+fallback artifacts on some OpenCode rows:
 
 ```bash
 --agent-timeout-seconds 1800 \
+--opencode-timeout-seconds 1200 \
+--allow-short-opencode-timeout \
 --item-timeout-seconds 2400
 ```
 
 Meaning:
 
-- `--agent-timeout-seconds 1800` gives the agent 30 minutes inside EVMBench.
+- `--opencode-timeout-seconds 1200` gives the OpenCode CLI 20 minutes.
+- `--agent-timeout-seconds 1800` gives EVMBench 30 minutes around the agent.
 - `--item-timeout-seconds 2400` gives the whole EVMBench process 40 minutes,
   including container startup, task setup, the agent run, and grading.
 
-Use the safer full-run timeout pair when reducing timeout failures matters more
-than limiting wall-clock cost:
+Use the safer OpenCode GPT-5.4 full-run timeout set when reducing timeout
+failures matters more than limiting wall-clock cost:
 
 ```bash
---agent-timeout-seconds 3600 \
---item-timeout-seconds 4500
+--opencode-timeout-seconds 7200 \
+--agent-timeout-seconds 7800 \
+--item-timeout-seconds 10800
 ```
 
 Worst-case wall time for all 156 runs is approximately:
 
 - `1800/2400`: up to 104 hours.
-- `3600/4500`: up to 195 hours.
+- `7200/7800/10800`: up to 468 hours.
 
 Run small chunks first. OpenCode has historically used more tokens and wall
 time than Codex CLI on these tasks.
@@ -297,22 +311,25 @@ interactive access.
 
 ### Next long run to start
 
-Start with Codex on the four remaining compact rich audits, patch first and
-exploit second. This avoids duplicating the completed Panoptic and Blackhole
-rows and defers OpenCode until its detect/patch submission behavior is
-understood.
+Start with direct-OpenAI Codex on no-overlap patch/exploit rows. For this
+queue, no-overlap means no matching `(mode, audit_id)` row exists under any
+local `runs/` provider/model output root, including the June 1 provider-v1
+Azure Foundry rows. Azure Foundry rows are useful for avoiding duplicate local
+work, but they do not count as direct-OpenAI tracker coverage.
 
-The validated plan expands to 8 runs total:
+The validated plan expands to 10 Codex runs total:
 
 ```text
-patch:2023-10-nextgen
-patch:2023-12-ethereumcreditguild
-patch:2024-05-olas
-patch:2024-07-basin
-exploit:2023-10-nextgen
-exploit:2023-12-ethereumcreditguild
-exploit:2024-05-olas
-exploit:2024-07-basin
+patch:2023-07-pooltogether
+patch:2024-01-renft
+patch:2024-03-taiko
+patch:2024-06-size
+patch:2024-07-benddao
+patch:2024-07-traitforge
+exploit:2023-07-pooltogether
+exploit:2024-01-renft
+exploit:2024-07-benddao
+exploit:2024-07-traitforge
 ```
 
 Build or verify the required audit images first:
@@ -320,7 +337,7 @@ Build or verify the required audit images first:
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache \
 evmbench/agents/openrouter-v1/run_openrouter_v1.sh docker-plan \
-  --tasks patch:2023-10-nextgen,patch:2023-12-ethereumcreditguild,patch:2024-05-olas,patch:2024-07-basin,exploit:2023-10-nextgen,exploit:2023-12-ethereumcreditguild,exploit:2024-05-olas,exploit:2024-07-basin
+  --tasks patch:2023-07-pooltogether,patch:2024-01-renft,patch:2024-03-taiko,patch:2024-06-size,patch:2024-07-benddao,patch:2024-07-traitforge,exploit:2023-07-pooltogether,exploit:2024-01-renft,exploit:2024-07-benddao,exploit:2024-07-traitforge
 ```
 
 ### Start With tmux
@@ -328,7 +345,7 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh docker-plan \
 Create a persistent session:
 
 ```bash
-tmux new -s evmbench-gpt54-codex-rich4
+tmux new -s evmbench-gpt54-codex-nooverlap
 ```
 
 Inside the `tmux` session, start the run:
@@ -339,19 +356,21 @@ set -a
 . ./.env
 set +a
 
-PATCH_TASKS="patch:2023-10-nextgen"
-PATCH_TASKS+=",patch:2023-12-ethereumcreditguild"
-PATCH_TASKS+=",patch:2024-05-olas"
-PATCH_TASKS+=",patch:2024-07-basin"
+PATCH_TASKS="patch:2023-07-pooltogether"
+PATCH_TASKS+=",patch:2024-01-renft"
+PATCH_TASKS+=",patch:2024-03-taiko"
+PATCH_TASKS+=",patch:2024-06-size"
+PATCH_TASKS+=",patch:2024-07-benddao"
+PATCH_TASKS+=",patch:2024-07-traitforge"
 
-EXPLOIT_TASKS="exploit:2023-10-nextgen"
-EXPLOIT_TASKS+=",exploit:2023-12-ethereumcreditguild"
-EXPLOIT_TASKS+=",exploit:2024-05-olas"
-EXPLOIT_TASKS+=",exploit:2024-07-basin"
+EXPLOIT_TASKS="exploit:2023-07-pooltogether"
+EXPLOIT_TASKS+=",exploit:2024-01-renft"
+EXPLOIT_TASKS+=",exploit:2024-07-benddao"
+EXPLOIT_TASKS+=",exploit:2024-07-traitforge"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-PATCH_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-rich4-patch-${STAMP}"
-EXPLOIT_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-rich4-exploit-${STAMP}"
+PATCH_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-nooverlap-patch-${STAMP}"
+EXPLOIT_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-nooverlap-exploit-${STAMP}"
 
 evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --provider openai \
@@ -381,13 +400,13 @@ Ctrl-b d
 Reattach later:
 
 ```bash
-tmux attach -t evmbench-gpt54-codex-rich4
+tmux attach -t evmbench-gpt54-codex-nooverlap
 ```
 
 Check from another shell:
 
 ```bash
-find runs/openrouter-v1 -path '*/_task_results/*.json' -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort
+find runs/openrouter-v1 runs/provider-v1 -path '*/_task_results/*.json' -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort
 ps -eo pid,ppid,pgid,stat,etime,cmd | rg 'run_openrouter_v1|evmbench.nano.entrypoint|codex-openrouter'
 ```
 
@@ -398,7 +417,7 @@ small script so quoting and environment setup are stable:
 
 ```bash
 mkdir -p runs/openrouter-v1/_launch_logs
-cat > /tmp/run-gpt54-codex-rich4.sh <<'EOF'
+cat > /tmp/run-gpt54-codex-nooverlap.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cd /home/experiments_base/forestOfAudits/project/evmbench
@@ -407,19 +426,21 @@ set -a
 . ./.env
 set +a
 
-PATCH_TASKS="patch:2023-10-nextgen"
-PATCH_TASKS+=",patch:2023-12-ethereumcreditguild"
-PATCH_TASKS+=",patch:2024-05-olas"
-PATCH_TASKS+=",patch:2024-07-basin"
+PATCH_TASKS="patch:2023-07-pooltogether"
+PATCH_TASKS+=",patch:2024-01-renft"
+PATCH_TASKS+=",patch:2024-03-taiko"
+PATCH_TASKS+=",patch:2024-06-size"
+PATCH_TASKS+=",patch:2024-07-benddao"
+PATCH_TASKS+=",patch:2024-07-traitforge"
 
-EXPLOIT_TASKS="exploit:2023-10-nextgen"
-EXPLOIT_TASKS+=",exploit:2023-12-ethereumcreditguild"
-EXPLOIT_TASKS+=",exploit:2024-05-olas"
-EXPLOIT_TASKS+=",exploit:2024-07-basin"
+EXPLOIT_TASKS="exploit:2023-07-pooltogether"
+EXPLOIT_TASKS+=",exploit:2024-01-renft"
+EXPLOIT_TASKS+=",exploit:2024-07-benddao"
+EXPLOIT_TASKS+=",exploit:2024-07-traitforge"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-PATCH_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-rich4-patch-${STAMP}"
-EXPLOIT_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-rich4-exploit-${STAMP}"
+PATCH_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-nooverlap-patch-${STAMP}"
+EXPLOIT_ROOT="runs/openrouter-v1/openai-gpt-5.4-codex-nooverlap-exploit-${STAMP}"
 
 evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --provider openai \
@@ -439,10 +460,10 @@ exec evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --agent-timeout-seconds 3600 \
   --item-timeout-seconds 4500
 EOF
-chmod +x /tmp/run-gpt54-codex-rich4.sh
+chmod +x /tmp/run-gpt54-codex-nooverlap.sh
 
-nohup /tmp/run-gpt54-codex-rich4.sh \
-  > "runs/openrouter-v1/_launch_logs/codex-rich4-$(date -u +%Y%m%dT%H%M%SZ).log" \
+nohup /tmp/run-gpt54-codex-nooverlap.sh \
+  > "runs/openrouter-v1/_launch_logs/codex-nooverlap-$(date -u +%Y%m%dT%H%M%SZ).log" \
   2>&1 &
 echo "launcher pid: $!"
 ```
@@ -450,8 +471,8 @@ echo "launcher pid: $!"
 Monitor it:
 
 ```bash
-tail -f runs/openrouter-v1/_launch_logs/codex-rich4-*.log
-find runs/openrouter-v1 -path '*/_task_results/*.json' -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort
+tail -f runs/openrouter-v1/_launch_logs/codex-nooverlap-*.log
+find runs/openrouter-v1 runs/provider-v1 -path '*/_task_results/*.json' -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort
 ```
 
 If a wrapper disappears but an EVMBench child remains alive with stale logs,
@@ -668,7 +689,8 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh plan \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800
 ```
 
 Run:
@@ -685,8 +707,9 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800 \
-  --item-timeout-seconds 2400
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800 \
+  --item-timeout-seconds 10800
 ```
 
 ### Sample 2: two-audit patch and exploit check
@@ -709,7 +732,8 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh plan \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800
 ```
 
 Run:
@@ -727,8 +751,9 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800 \
-  --item-timeout-seconds 2400
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800 \
+  --item-timeout-seconds 10800
 ```
 
 ### Sample 3: detect-only cheap breadth
@@ -750,7 +775,8 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh plan \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800
 ```
 
 Run:
@@ -767,8 +793,9 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root "$OUTPUT_ROOT" \
-  --agent-timeout-seconds 1800 \
-  --item-timeout-seconds 2400
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800 \
+  --item-timeout-seconds 10800
 ```
 
 The completed result table for this sample is archived in
@@ -793,7 +820,8 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh plan \
   --harnesses codex,opencode \
   --model gpt-5.4 \
   --output-root runs/openrouter-v1/openai-gpt-5.4-full-benchmark \
-  --agent-timeout-seconds 1800
+  --opencode-timeout-seconds 7200 \
+  --agent-timeout-seconds 7800
 ```
 
 Expected output:

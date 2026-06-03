@@ -65,8 +65,10 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --tasks detect:2024-01-canto \
   --harnesses codex,opencode \
   --model openai/gpt-5-nano \
+  --opencode-timeout-seconds 540 \
   --agent-timeout-seconds 600 \
-  --item-timeout-seconds 900
+  --item-timeout-seconds 900 \
+  --allow-short-opencode-timeout
 ```
 
 Direct OpenAI uses unqualified OpenAI model IDs:
@@ -77,8 +79,10 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --tasks detect:2024-01-canto \
   --harnesses codex,opencode \
   --model gpt-5-nano \
+  --opencode-timeout-seconds 540 \
   --agent-timeout-seconds 600 \
-  --item-timeout-seconds 900
+  --item-timeout-seconds 900 \
+  --allow-short-opencode-timeout
 ```
 
 vLLM defaults its base URL from `VLLM_API_BASE`:
@@ -90,8 +94,10 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model Qwen/Qwen3.6-27B \
   --output-root runs/provider-v1/vllm-smoke \
+  --opencode-timeout-seconds 540 \
   --agent-timeout-seconds 600 \
-  --item-timeout-seconds 900
+  --item-timeout-seconds 900 \
+  --allow-short-opencode-timeout
 ```
 
 Azure Foundry defaults its smoke model to `gpt-4.1-nano` if `--model` is omitted:
@@ -113,8 +119,10 @@ evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
   --harnesses codex,opencode \
   --model gpt-4.1-nano \
   --output-root runs/provider-v1/azure-foundry-smoke-gpt-4.1-nano \
+  --opencode-timeout-seconds 540 \
   --agent-timeout-seconds 600 \
   --item-timeout-seconds 900 \
+  --allow-short-opencode-timeout \
   --stop-on-failure
 ```
 

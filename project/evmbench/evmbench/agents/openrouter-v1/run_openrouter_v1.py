@@ -38,6 +38,11 @@ MATRIX_FILENAME = "openrouter-v1-matrix.json"
 RESULTS_FILENAME = "openrouter-v1-results.json"
 SUMMARY_FILENAME = "openrouter-v1-summary.md"
 CSV_FILENAME = "openrouter-v1-results.csv"
+DEFAULT_OPENCODE_GPT54_TIMEOUT_SECONDS = 7200
+DEFAULT_OPENCODE_GPT54_SOLVER_TIMEOUT_SECONDS = 7800
+DEFAULT_OPENCODE_GPT54_ITEM_TIMEOUT_SECONDS = 10800
+OPENCODE_SOLVER_HEADROOM_SECONDS = 600
+MIN_OPENCODE_TIMEOUT_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -396,12 +401,21 @@ def build_run_matrix(
     base_url: str | None,
     provider: ProviderSpec | str = DEFAULT_PROVIDER,
     agent_timeout_seconds: float | None = None,
+    opencode_timeout_seconds: float | None = None,
+    allow_short_opencode_timeout: bool = False,
 ) -> list[OpenRouterV1Run]:
     matrix: list[OpenRouterV1Run] = []
     provider_spec = parse_provider(provider) if isinstance(provider, str) else provider
     normalized_base_url = normalize_provider_base_url(provider_spec, base_url)
     for harness in harnesses:
         for model in models:
+            row_agent_timeout_seconds, row_opencode_timeout_seconds = resolve_row_timeouts(
+                harness=harness,
+                model=model,
+                agent_timeout_seconds=agent_timeout_seconds,
+                opencode_timeout_seconds=opencode_timeout_seconds,
+                allow_short_opencode_timeout=allow_short_opencode_timeout,
+            )
             for task in tasks:
                 run_key = run_key_for(harness.slug, model, task)
                 runs_dir = output_root / "evmbench_runs" / run_key
@@ -426,8 +440,8 @@ def build_run_matrix(
                 elif provider_spec.provider_id == "azure-foundry":
                     env["AZURE_FOUNDRY_BASE_URL"] = normalized_base_url
                     env["OPENAI_BASE_URL"] = normalized_base_url
-                if agent_timeout_seconds and agent_timeout_seconds > 0:
-                    env["EVMBENCH_OPENROUTER_AGENT_TIMEOUT_SECONDS"] = str(int(agent_timeout_seconds))
+                if row_opencode_timeout_seconds and row_opencode_timeout_seconds > 0:
+                    env["EVMBENCH_OPENROUTER_AGENT_TIMEOUT_SECONDS"] = str(int(row_opencode_timeout_seconds))
                 matrix.append(
                     OpenRouterV1Run(
                         run_key=run_key,
@@ -445,13 +459,55 @@ def build_run_matrix(
                             audit_id=task.audit_id,
                             runs_dir=runs_dir,
                             mode=task.mode,
-                            agent_timeout_seconds=agent_timeout_seconds,
+                            agent_timeout_seconds=row_agent_timeout_seconds,
                             judge_model=model if provider_spec.provider_id == "azure-foundry" else None,
                         ),
                         env=env,
                     )
                 )
     return matrix
+
+
+def _is_gpt54_model(model: str) -> bool:
+    return "gpt-5.4" in model
+
+
+def resolve_row_timeouts(
+    *,
+    harness: HarnessSpec,
+    model: str,
+    agent_timeout_seconds: float | None,
+    opencode_timeout_seconds: float | None,
+    allow_short_opencode_timeout: bool,
+) -> tuple[float | None, float | None]:
+    row_agent_timeout_seconds = agent_timeout_seconds if agent_timeout_seconds and agent_timeout_seconds > 0 else None
+    if harness.slug != "opencode":
+        return row_agent_timeout_seconds, None
+
+    row_opencode_timeout_seconds = opencode_timeout_seconds if opencode_timeout_seconds and opencode_timeout_seconds > 0 else None
+    if row_opencode_timeout_seconds is not None and row_agent_timeout_seconds is None:
+        row_agent_timeout_seconds = row_opencode_timeout_seconds + OPENCODE_SOLVER_HEADROOM_SECONDS
+    elif row_opencode_timeout_seconds is None and row_agent_timeout_seconds is not None:
+        row_opencode_timeout_seconds = row_agent_timeout_seconds - OPENCODE_SOLVER_HEADROOM_SECONDS
+    elif row_opencode_timeout_seconds is None and _is_gpt54_model(model):
+        row_opencode_timeout_seconds = DEFAULT_OPENCODE_GPT54_TIMEOUT_SECONDS
+        row_agent_timeout_seconds = DEFAULT_OPENCODE_GPT54_SOLVER_TIMEOUT_SECONDS
+
+    if row_opencode_timeout_seconds is None:
+        return row_agent_timeout_seconds, None
+    if row_opencode_timeout_seconds <= 0:
+        raise ValueError("OpenCode timeout must be positive after solver headroom is applied.")
+    if row_agent_timeout_seconds is not None and row_agent_timeout_seconds <= row_opencode_timeout_seconds:
+        raise ValueError(
+            "OpenCode timeout must be lower than EVMBench solver timeout "
+            f"(opencode={row_opencode_timeout_seconds}, solver={row_agent_timeout_seconds})."
+        )
+    if row_opencode_timeout_seconds < MIN_OPENCODE_TIMEOUT_SECONDS and not allow_short_opencode_timeout:
+        raise ValueError(
+            f"OpenCode timeout {int(row_opencode_timeout_seconds)}s is below the "
+            f"{MIN_OPENCODE_TIMEOUT_SECONDS}s minimum. Pass --allow-short-opencode-timeout for smoke tests."
+        )
+    return row_agent_timeout_seconds, row_opencode_timeout_seconds
 
 
 def matrix_payload(output_root: Path, matrix: list[OpenRouterV1Run]) -> dict[str, Any]:
@@ -754,6 +810,23 @@ def _trajectory_manifest(run_dir: Path | None) -> tuple[str | None, dict[str, An
     return None, None
 
 
+def _opencode_status(run_dir: Path | None) -> tuple[str | None, dict[str, Any] | None]:
+    if not run_dir:
+        return None, None
+    candidates = [
+        run_dir / "logs" / "opencode" / "status.json",
+        run_dir / "modal" / "logs" / "opencode" / "status.json",
+    ]
+    for path in candidates:
+        status = _read_json(path)
+        if status:
+            try:
+                return str(path.relative_to(run_dir)), status
+            except ValueError:
+                return str(path), status
+    return None, None
+
+
 def _manifest_count(manifest: dict[str, Any] | None, key: str) -> int:
     if not manifest:
         return 0
@@ -786,11 +859,26 @@ def summarize_row(
     grade = parse_run_grade(run_dir)
     command_status = command_status or _command_status_from_task_result(output_root, item)
     submission_path = run_dir / "submission" / submission_filename(item.mode) if run_dir else None
-    submission_exists = bool(submission_path and submission_path.exists() and submission_path.stat().st_size > 0)
+    submission_file_exists = bool(submission_path and submission_path.exists())
+    submission_nonempty = bool(submission_file_exists and submission_path and submission_path.stat().st_size > 0)
+    submission_exists = submission_nonempty
     trajectory_manifest_path, trajectory_manifest = _trajectory_manifest(run_dir)
+    opencode_status_path, opencode_status = _opencode_status(run_dir)
     expected_trajectory_count = _manifest_count(trajectory_manifest, "expected_trajectory_count")
     found_trajectory_count = _manifest_count(trajectory_manifest, "found_trajectory_count")
     missing_trajectory_count = _manifest_count(trajectory_manifest, "missing_trajectory_count")
+    manifest_submission = trajectory_manifest.get("submission") if isinstance(trajectory_manifest, dict) else None
+    submission_fallback = False
+    submission_fallback_reason = None
+    if isinstance(manifest_submission, dict):
+        submission_fallback = bool(manifest_submission.get("fallback"))
+        reason = manifest_submission.get("fallback_reason")
+        submission_fallback_reason = reason if isinstance(reason, str) and reason else None
+    if isinstance(opencode_status, dict):
+        submission_fallback = submission_fallback or bool(opencode_status.get("submission_fallback"))
+        reason = opencode_status.get("submission_fallback_reason")
+        if isinstance(reason, str) and reason:
+            submission_fallback_reason = reason
 
     score = _float_or_none(grade.get("score") if grade else None)
     max_score = _float_or_none(grade.get("max_score") if grade else None)
@@ -818,6 +906,18 @@ def summarize_row(
     elif not grade:
         failure_reason = "grade not found in run.log"
 
+    if isinstance(opencode_status, dict):
+        real_exit_code = opencode_status.get("real_exit_code")
+        if opencode_status.get("timed_out"):
+            failure_reason = _append_failure_reason(failure_reason, "opencode timed out")
+        elif real_exit_code not in (0, None):
+            failure_reason = _append_failure_reason(failure_reason, f"opencode exited {real_exit_code}")
+    if submission_fallback:
+        fallback_text = "fallback submission generated"
+        if submission_fallback_reason:
+            fallback_text = f"{fallback_text}: {submission_fallback_reason}"
+        failure_reason = _append_failure_reason(failure_reason, fallback_text)
+
     if run_dir and not trajectory_manifest:
         failure_reason = _append_failure_reason(failure_reason, "trajectory manifest not found")
     elif trajectory_manifest and missing_trajectory_count:
@@ -840,6 +940,10 @@ def summarize_row(
         "command_status": command_status,
         "submission_path": str(submission_path) if submission_path else None,
         "submission_exists": submission_exists,
+        "submission_file_exists": submission_file_exists,
+        "submission_nonempty": submission_nonempty,
+        "submission_fallback": submission_fallback,
+        "submission_fallback_reason": submission_fallback_reason,
         "score": score,
         "max_score": max_score,
         "score_percentage": _percentage(score, max_score),
@@ -849,6 +953,7 @@ def summarize_row(
         "agent_runtime_seconds": agent_runtime,
         "trajectory_paths": trajectory_paths,
         "trajectory_manifest": trajectory_manifest_path,
+        "opencode_status": opencode_status_path,
         "expected_trajectory_count": expected_trajectory_count,
         "found_trajectory_count": found_trajectory_count,
         "missing_trajectory_count": missing_trajectory_count,
@@ -867,6 +972,7 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "model": row["model"],
                 "n_rows": 0,
                 "n_successful_submissions": 0,
+                "n_fallback_submissions": 0,
                 "n_failures": 0,
                 "score": 0.0,
                 "max_score": 0.0,
@@ -877,6 +983,8 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         bucket["n_rows"] += 1
         if row.get("submission_exists"):
             bucket["n_successful_submissions"] += 1
+        if row.get("submission_fallback"):
+            bucket["n_fallback_submissions"] += 1
         if row.get("failure_reason"):
             bucket["n_failures"] += 1
         for field in ("score", "max_score", "detect_award", "detect_max_award"):
@@ -905,8 +1013,8 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
         "",
         "## Aggregate",
         "",
-        "| Harness | Model | Rows | Submissions | Failures | Score | Detect Award |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Harness | Model | Rows | Submissions | Fallbacks | Failures | Score | Detect Award |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for bucket in sorted(aggregate.values(), key=lambda item: (item["harness"], item["model"])):
         lines.append(
@@ -917,6 +1025,7 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
                     str(bucket["model"]),
                     str(bucket["n_rows"]),
                     str(bucket["n_successful_submissions"]),
+                    str(bucket["n_fallback_submissions"]),
                     str(bucket["n_failures"]),
                     f"{bucket['score']:.2f}/{bucket['max_score']:.2f} ({_fmt(bucket['score_percentage'])}%)",
                     f"{bucket['detect_award']:.2f}/{bucket['detect_max_award']:.2f} ({_fmt(bucket['detect_award_percentage'])}%)",
@@ -935,6 +1044,12 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
         ]
     )
     for row in rows:
+        if row.get("submission_fallback"):
+            submission = "fallback"
+        elif row.get("submission_exists"):
+            submission = "yes"
+        else:
+            submission = "no"
         score = (
             f"{_fmt(row.get('score'))}/{_fmt(row.get('max_score'))} ({_fmt(row.get('score_percentage'))}%)"
             if row.get("score") is not None or row.get("max_score") is not None
@@ -954,7 +1069,7 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
                     str(row["model"]),
                     str(row["mode"]),
                     str(row["audit_id"]),
-                    "yes" if row.get("submission_exists") else "no",
+                    submission,
                     trace,
                     score,
                     str(row.get("failure_reason") or ""),
@@ -980,6 +1095,10 @@ def write_results_csv(output_root: Path, rows: list[dict[str, Any]]) -> Path:
         "mode",
         "audit_id",
         "submission_exists",
+        "submission_file_exists",
+        "submission_nonempty",
+        "submission_fallback",
+        "submission_fallback_reason",
         "score",
         "max_score",
         "score_percentage",
@@ -989,6 +1108,7 @@ def write_results_csv(output_root: Path, rows: list[dict[str, Any]]) -> Path:
         "agent_runtime_seconds",
         "failure_reason",
         "trajectory_manifest",
+        "opencode_status",
         "expected_trajectory_count",
         "found_trajectory_count",
         "missing_trajectory_count",
@@ -1108,6 +1228,43 @@ def run_matrix(
     return overall_returncode
 
 
+def _solver_timeout_from_command(command: tuple[str, ...]) -> float | None:
+    prefix = "evmbench.solver.timeout="
+    for arg in command:
+        if arg.startswith(prefix):
+            try:
+                return float(arg.removeprefix(prefix))
+            except ValueError:
+                return None
+    return None
+
+
+def default_item_timeout_seconds(matrix: list[OpenRouterV1Run]) -> float | None:
+    if any(item.harness == "opencode" and _is_gpt54_model(item.model) for item in matrix):
+        return DEFAULT_OPENCODE_GPT54_ITEM_TIMEOUT_SECONDS
+    return None
+
+
+def validate_item_timeout_seconds(matrix: list[OpenRouterV1Run], item_timeout_seconds: float | None) -> None:
+    if item_timeout_seconds is None:
+        return
+    for item in matrix:
+        if item.harness != "opencode":
+            continue
+        solver_timeout = _solver_timeout_from_command(item.command)
+        if solver_timeout is not None and item_timeout_seconds <= solver_timeout:
+            raise ValueError(
+                "Item timeout must be larger than the EVMBench solver timeout for OpenCode rows "
+                f"(item={item_timeout_seconds}, solver={solver_timeout}, run={item.run_key})."
+            )
+        opencode_timeout = _float_or_none(item.env.get("EVMBENCH_OPENROUTER_AGENT_TIMEOUT_SECONDS"))
+        if opencode_timeout is not None and solver_timeout is not None and solver_timeout <= opencode_timeout:
+            raise ValueError(
+                "EVMBench solver timeout must be larger than the OpenCode process timeout "
+                f"(solver={solver_timeout}, opencode={opencode_timeout}, run={item.run_key})."
+            )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1134,6 +1291,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             type=float,
             default=float(os.getenv("OPENROUTER_V1_AGENT_TIMEOUT_SECONDS", "0") or "0"),
             help="EVMBench solver timeout per task. Use 0 to keep the solver default.",
+        )
+        subparser.add_argument(
+            "--opencode-timeout-seconds",
+            type=float,
+            default=float(os.getenv("OPENROUTER_V1_OPENCODE_TIMEOUT_SECONDS", "0") or "0"),
+            help="OpenCode CLI process timeout per task. Use 0 to derive from solver/model defaults.",
+        )
+        subparser.add_argument(
+            "--allow-short-opencode-timeout",
+            action="store_true",
+            help="Allow OpenCode process timeouts below 3600 seconds for smoke tests.",
         )
 
     plan_parser = subparsers.add_parser("plan", help="Print the provider command matrix.")
@@ -1184,6 +1352,8 @@ def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, list[OpenRouterV1
         provider=provider,
         base_url=args.base_url,
         agent_timeout_seconds=args.agent_timeout_seconds if args.agent_timeout_seconds > 0 else None,
+        opencode_timeout_seconds=args.opencode_timeout_seconds if args.opencode_timeout_seconds > 0 else None,
+        allow_short_opencode_timeout=args.allow_short_opencode_timeout,
     )
     return output_root, matrix
 
@@ -1204,7 +1374,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             output_root, matrix = _matrix_from_args(args)
             print(f"Writing provider v1 outputs to {output_root}")
-            item_timeout_seconds = args.item_timeout_seconds if args.item_timeout_seconds > 0 else None
+            item_timeout_seconds = (
+                args.item_timeout_seconds
+                if args.item_timeout_seconds > 0
+                else default_item_timeout_seconds(matrix)
+            )
+            validate_item_timeout_seconds(matrix, item_timeout_seconds)
             return run_matrix(
                 output_root,
                 matrix,

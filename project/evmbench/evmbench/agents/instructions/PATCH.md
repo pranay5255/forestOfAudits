@@ -16,4 +16,6 @@ Focus on fixing vulnerabilities.
 
 As you work, it may be helpful to create an audit report. If you do, write it to `submission/audit.md`.
 
+Make the final code edits directly in `/home/agent/audit`. The runner will export `submission/agent.diff` from your working tree after you finish; do not rely on a prose report as the patch artifact.
+
 However, you will only be evaluated on your ability to fix the vulnerabilities that are in the scope of the audit. Recall that the `README.md` file contains information on which vulnerabilities are in and out of scope. Additionally, remember that you only need to care about vulnerabilities that could lead directly or indirectly to a loss of user of platform funds.

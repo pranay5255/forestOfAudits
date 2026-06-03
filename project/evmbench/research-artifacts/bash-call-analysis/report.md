@@ -180,6 +180,27 @@ Commands are redacted for obvious key/token/password/private-key assignments, no
 - Harness x intent summary: `research-artifacts/bash-call-analysis/intent_by_harness.csv`
 - Mode x intent summary: `research-artifacts/bash-call-analysis/intent_by_mode.csv`
 
+## June 1 Provider-v1 Delta
+
+This is a delta-only update generated from the current extractor output in
+`/tmp/bash-call-analysis-current`. Legacy joined plots and
+`research-artifacts/bash-call-analysis/index.html` were left unchanged.
+
+- Scope: June 1 Azure Foundry provider-v1 Codex batch under `runs/provider-v1`.
+- Extracted `486` provider-v1 bash invocations and `2,920` split shell
+  segments.
+- Mode split by invocation: detect `192`, patch `96`, exploit `198`.
+- Top invocation categories: file read/navigation `179`, text search `97`,
+  on-chain query `81`.
+- Nonzero-exit invocations: `0`.
+- Most command-heavy agent rows, excluding runner metadata: exploit
+  `2023-12-ethereumcreditguild` `62`; exploit `2024-05-olas` `55`.
+
+Delta artifacts:
+
+- `research-artifacts/bash-call-analysis/provider_v1_20260601_invocations.csv`
+- `research-artifacts/bash-call-analysis/provider_v1_20260601_category_summary.csv`
+
 ## Notes and Limits
 
 - Counts are based on the artifacts currently present under `runs/`; copied RCA artifacts are treated as present run artifacts unless their logical call IDs duplicate within the same run directory.

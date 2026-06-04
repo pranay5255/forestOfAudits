@@ -180,7 +180,8 @@ class EVMbenchSolver(PythonCodingSolver):
                 agent_output = await self._run_modal_agent_without_local_computer(task, agent)
                 grade = self._modal_runner_grade(task, agent_output)
                 ctx_logger.info(
-                    f"[{task.audit.id}] Graded. Score: {grade.evmbench_result.score}/{grade.evmbench_result.max_score}",
+                    f"[{task.audit.id}] Modal runner completed; local benchmark grading was skipped. "
+                    f"Placeholder score: {grade.evmbench_result.score}/{grade.evmbench_result.max_score}",
                     destinations=["group", "run"],
                     _print=True,
                 )
@@ -227,6 +228,13 @@ class EVMbenchSolver(PythonCodingSolver):
         yield FinalResult(grade=grade)
 
     def _modal_runner_grade(self, task: EVMTask, agent_output: AgentOutput) -> EVMbenchGrade:
+        details = {
+            "modal_runner": True,
+            "graded_in_modal_runner": False,
+            "benchmark_grade_valid": False,
+            "score_is_placeholder": True,
+            "grade_source": "modal_runner_placeholder",
+        }
         if task.mode == "detect":
             result = EVMbenchDetectResult(
                 audit_id=task.audit.id,
@@ -235,7 +243,7 @@ class EVMbenchSolver(PythonCodingSolver):
                 detect_award=0.0,
                 detect_max_award=task.audit.detect_max_award,
                 agent_output=agent_output,
-                details={"modal_runner": True, "graded_in_modal_runner": False},
+                details=details,
             )
         else:
             result = EVMbenchResult(
@@ -243,11 +251,14 @@ class EVMbenchSolver(PythonCodingSolver):
                 score=0,
                 max_score=len(task.audit.vulnerabilities),
                 agent_output=agent_output,
-                details={"modal_runner": True, "graded_in_modal_runner": False},
+                details=details,
             )
         return EVMbenchGrade(
             score=result.score,
-            grader_log="Modal runner completed; local Docker grading was skipped.",
+            grader_log=(
+                "Modal runner completed and produced a submission; local Docker grading was skipped, "
+                "so this score is a placeholder and is not a benchmark result."
+            ),
             evmbench_result=result,
         )
 

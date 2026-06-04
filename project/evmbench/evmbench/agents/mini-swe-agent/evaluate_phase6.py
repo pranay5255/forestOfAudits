@@ -508,10 +508,16 @@ def _print_run_summary(output_root: Path, item: Phase6Run, status: dict[str, Any
     if row.get("failure_reason"):
         _phase6_log(f"failure: {row['failure_reason']}")
     elif row.get("score") is not None or row.get("max_score") is not None:
+        grade_label = "valid"
+        if row.get("score_is_placeholder"):
+            grade_label = "placeholder"
+        elif not row.get("benchmark_grade_valid"):
+            grade_label = "unverified"
         _phase6_log(
-            "score: "
+            f"{grade_label} score: "
             f"{_fmt(row.get('score'))}/{_fmt(row.get('max_score'))} "
-            f"detect_award={_fmt(row.get('detect_award'))}/{_fmt(row.get('detect_max_award'))}"
+            f"detect_award={_fmt(row.get('detect_award'))}/{_fmt(row.get('detect_max_award'))} "
+            f"source={row.get('grade_source') or '-'}"
         )
 
     selected_roles = row.get("selected_roles") or []
@@ -602,6 +608,9 @@ def run_matrix(
             f"aggregate {runner}: submissions={bucket['n_successful_submissions']}/{bucket['n_rows']} "
             f"failures={bucket['n_failures']} "
             f"score={bucket['score']:.2f}/{bucket['max_score']:.2f} "
+            f"valid_scores={bucket['n_valid_benchmark_scores']} "
+            f"valid_score={bucket['valid_score']:.2f}/{bucket['valid_max_score']:.2f} "
+            f"placeholder_scores={bucket['n_placeholder_scores']} "
             f"detect_award={bucket['detect_award']:.2f}/{bucket['detect_max_award']:.2f}"
         )
     return overall_returncode
@@ -722,6 +731,39 @@ def _percentage(score: float | None, max_score: float | None) -> float | None:
     return (score / max_score) * 100.0
 
 
+def _grade_validity(grade: dict[str, Any] | None) -> dict[str, Any]:
+    if not grade:
+        return {
+            "benchmark_grade_valid": False,
+            "score_is_placeholder": False,
+            "grade_source": None,
+        }
+
+    raw_details = grade.get("details")
+    details = raw_details if isinstance(raw_details, dict) else {}
+    score_is_placeholder = bool(
+        details.get("score_is_placeholder")
+        or (
+            details.get("modal_runner") is True
+            and details.get("graded_in_modal_runner") is False
+        )
+    )
+    raw_valid = details.get("benchmark_grade_valid")
+    benchmark_grade_valid = raw_valid if isinstance(raw_valid, bool) else not score_is_placeholder
+    grade_source = details.get("grade_source")
+    if not isinstance(grade_source, str) or not grade_source:
+        if details.get("modal_runner") is True:
+            grade_source = "modal_runner" if benchmark_grade_valid else "modal_runner_placeholder"
+        else:
+            grade_source = "local"
+
+    return {
+        "benchmark_grade_valid": benchmark_grade_valid,
+        "score_is_placeholder": score_is_placeholder,
+        "grade_source": grade_source,
+    }
+
+
 def _relative_paths(paths: list[Path], base: Path) -> list[str]:
     rendered: list[str] = []
     for path in paths:
@@ -800,6 +842,7 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
     max_score = _float_or_none(grade.get("max_score") if grade else None)
     detect_award = _float_or_none(grade.get("detect_award") if grade else None)
     detect_max_award = _float_or_none(grade.get("detect_max_award") if grade else None)
+    grade_validity = _grade_validity(grade)
     agent_output = grade.get("agent_output") if isinstance(grade, dict) else None
     agent_runtime = None
     if isinstance(agent_output, dict):
@@ -868,6 +911,9 @@ def summarize_row(output_root: Path, item: Phase6Run) -> dict[str, Any]:
         "score": score,
         "max_score": max_score,
         "score_percentage": _percentage(score, max_score),
+        "benchmark_grade_valid": grade_validity["benchmark_grade_valid"],
+        "score_is_placeholder": grade_validity["score_is_placeholder"],
+        "grade_source": grade_validity["grade_source"],
         "detect_award": detect_award,
         "detect_max_award": detect_max_award,
         "detect_award_percentage": _percentage(detect_award, detect_max_award),
@@ -898,10 +944,16 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "n_rows": 0,
                 "n_successful_submissions": 0,
                 "n_failures": 0,
+                "n_valid_benchmark_scores": 0,
+                "n_placeholder_scores": 0,
                 "score": 0.0,
                 "max_score": 0.0,
                 "detect_award": 0.0,
                 "detect_max_award": 0.0,
+                "valid_score": 0.0,
+                "valid_max_score": 0.0,
+                "valid_detect_award": 0.0,
+                "valid_detect_max_award": 0.0,
             },
         )
         bucket["n_rows"] += 1
@@ -909,14 +961,25 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["n_successful_submissions"] += 1
         if row.get("failure_reason"):
             bucket["n_failures"] += 1
+        if row.get("benchmark_grade_valid"):
+            bucket["n_valid_benchmark_scores"] += 1
+        if row.get("score_is_placeholder"):
+            bucket["n_placeholder_scores"] += 1
         for key in ("score", "max_score", "detect_award", "detect_max_award"):
             value = _float_or_none(row.get(key))
             if value is not None:
                 bucket[key] += value
+                if row.get("benchmark_grade_valid"):
+                    bucket[f"valid_{key}"] += value
 
     for bucket in by_runner.values():
         bucket["score_percentage"] = _percentage(bucket["score"], bucket["max_score"])
         bucket["detect_award_percentage"] = _percentage(bucket["detect_award"], bucket["detect_max_award"])
+        bucket["valid_score_percentage"] = _percentage(bucket["valid_score"], bucket["valid_max_score"])
+        bucket["valid_detect_award_percentage"] = _percentage(
+            bucket["valid_detect_award"],
+            bucket["valid_detect_max_award"],
+        )
     return by_runner
 
 
@@ -936,8 +999,8 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
         "",
         "## Aggregate",
         "",
-        "| Runner | Rows | Submissions | Failures | Score | Detect Award |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Runner | Rows | Submissions | Failures | Valid Scores | Placeholder Scores | Score | Valid Score | Detect Award | Valid Detect Award |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for runner, bucket in sorted(aggregate.items()):
         lines.append(
@@ -948,8 +1011,12 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
                     str(bucket["n_rows"]),
                     str(bucket["n_successful_submissions"]),
                     str(bucket["n_failures"]),
+                    str(bucket["n_valid_benchmark_scores"]),
+                    str(bucket["n_placeholder_scores"]),
                     f"{bucket['score']:.2f}/{bucket['max_score']:.2f} ({_fmt(bucket['score_percentage'])}%)",
+                    f"{bucket['valid_score']:.2f}/{bucket['valid_max_score']:.2f} ({_fmt(bucket['valid_score_percentage'])}%)",
                     f"{bucket['detect_award']:.2f}/{bucket['detect_max_award']:.2f} ({_fmt(bucket['detect_award_percentage'])}%)",
+                    f"{bucket['valid_detect_award']:.2f}/{bucket['valid_detect_max_award']:.2f} ({_fmt(bucket['valid_detect_award_percentage'])}%)",
                 ]
             )
             + " |"
@@ -960,8 +1027,8 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             "",
             "## Per Audit",
             "",
-            "| Runner | Mode | Audit | Submission | Trajectories | Score | Detect Award | Runtime | Failure | Run Dir |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+            "| Runner | Mode | Audit | Submission | Grade | Trajectories | Score | Detect Award | Runtime | Failure | Run Dir |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for row in rows:
@@ -980,6 +1047,12 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
             if row.get("expected_trajectory_count")
             else "-"
         )
+        if row.get("benchmark_grade_valid"):
+            grade_label = f"valid ({row.get('grade_source') or '-'})"
+        elif row.get("score_is_placeholder"):
+            grade_label = f"placeholder ({row.get('grade_source') or '-'})"
+        else:
+            grade_label = "missing"
         lines.append(
             "| "
             + " | ".join(
@@ -988,6 +1061,7 @@ def render_markdown(output_root: Path, rows: list[dict[str, Any]], aggregate: di
                     str(row.get("mode", "detect")),
                     str(row["audit_id"]),
                     "yes" if row.get("submission_exists") else "no",
+                    grade_label,
                     trajectories,
                     score,
                     award,
@@ -1049,12 +1123,20 @@ def _slide_runner_summary(rows: list[dict[str, Any]], aggregate: dict[str, Any])
                 "rows": bucket["n_rows"],
                 "successful_submissions": bucket["n_successful_submissions"],
                 "failures": bucket["n_failures"],
+                "valid_benchmark_scores": bucket["n_valid_benchmark_scores"],
+                "placeholder_scores": bucket["n_placeholder_scores"],
                 "score": bucket["score"],
                 "max_score": bucket["max_score"],
                 "score_percentage": bucket["score_percentage"],
+                "valid_score": bucket["valid_score"],
+                "valid_max_score": bucket["valid_max_score"],
+                "valid_score_percentage": bucket["valid_score_percentage"],
                 "detect_award": bucket["detect_award"],
                 "detect_max_award": bucket["detect_max_award"],
                 "detect_award_percentage": bucket["detect_award_percentage"],
+                "valid_detect_award": bucket["valid_detect_award"],
+                "valid_detect_max_award": bucket["valid_detect_max_award"],
+                "valid_detect_award_percentage": bucket["valid_detect_award_percentage"],
                 "total_runtime_seconds": _sum_numbers([row.get("agent_runtime_seconds") for row in runner_rows]),
                 "average_runtime_seconds": _avg_numbers([row.get("agent_runtime_seconds") for row in runner_rows]),
             }
@@ -1073,6 +1155,9 @@ def _slide_audit_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "score": row.get("score"),
             "max_score": row.get("max_score"),
             "score_percentage": row.get("score_percentage"),
+            "benchmark_grade_valid": row.get("benchmark_grade_valid"),
+            "score_is_placeholder": row.get("score_is_placeholder"),
+            "grade_source": row.get("grade_source"),
             "detect_award": row.get("detect_award"),
             "detect_max_award": row.get("detect_max_award"),
             "detect_award_percentage": row.get("detect_award_percentage"),
@@ -1144,6 +1229,9 @@ def write_slide_data(output_root: Path, slide_data: dict[str, Any]) -> None:
         "score",
         "max_score",
         "score_percentage",
+        "benchmark_grade_valid",
+        "score_is_placeholder",
+        "grade_source",
         "detect_award",
         "detect_max_award",
         "detect_award_percentage",

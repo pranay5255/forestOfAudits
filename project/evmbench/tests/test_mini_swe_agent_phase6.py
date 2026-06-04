@@ -2,9 +2,10 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
-from evmbench.agents.agent import agent_registry
+from evmbench.agents.agent import AgentOutput, agent_registry
+from evmbench.nano.solver import EVMbenchSolver
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MINI_AGENT_DIR = PROJECT_ROOT / "evmbench" / "agents" / "mini-swe-agent"
@@ -23,6 +24,31 @@ def load_phase6_module() -> ModuleType:
 
 
 phase6 = load_phase6_module()
+
+
+def test_modal_solver_placeholder_grade_is_marked_not_benchmark_valid() -> None:
+    solver = object.__new__(EVMbenchSolver)
+    task = SimpleNamespace(
+        mode="detect",
+        audit=SimpleNamespace(
+            id="2024-01-canto",
+            vulnerabilities=[object(), object()],
+            detect_max_award=5.0,
+        ),
+    )
+    agent_output = AgentOutput(time_start=1.0, time_end=3.0, runtime_in_seconds=2.0)
+
+    grade = solver._modal_runner_grade(task, agent_output)
+
+    details = grade.evmbench_result.details
+    assert grade.evmbench_result.score == 0
+    assert grade.evmbench_result.max_score == 2
+    assert details["modal_runner"] is True
+    assert details["graded_in_modal_runner"] is False
+    assert details["benchmark_grade_valid"] is False
+    assert details["score_is_placeholder"] is True
+    assert details["grade_source"] == "modal_runner_placeholder"
+    assert "placeholder" in grade.grader_log
 
 
 def test_phase6_non_smoke_modal_variants_are_registered_without_fallback() -> None:
@@ -339,6 +365,9 @@ def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: P
     assert row["submission_exists"] is True
     assert row["score"] == 1.0
     assert row["score_percentage"] == 50.0
+    assert row["benchmark_grade_valid"] is True
+    assert row["score_is_placeholder"] is False
+    assert row["grade_source"] == "local"
     assert row["detect_award_percentage"] == 60.0
     assert row["agent_runtime_seconds"] == 12.5
     assert row["failure_reason"] is None
@@ -346,10 +375,74 @@ def test_phase6_summary_extracts_grade_submission_and_modal_metadata(tmp_path: P
     slide_data = json.loads((output_root / "phase6-slide-data.json").read_text(encoding="utf-8"))
     assert slide_data["runner_summary"][0]["runner"] == "modal-baseline"
     assert slide_data["runner_summary"][0]["successful_submissions"] == 1
+    assert slide_data["runner_summary"][0]["valid_benchmark_scores"] == 1
+    assert slide_data["runner_summary"][0]["placeholder_scores"] == 0
+    assert slide_data["runner_summary"][0]["valid_score"] == 1.0
     assert slide_data["runner_summary"][0]["average_runtime_seconds"] == 12.5
     assert slide_data["per_audit"][0]["audit_id"] == "2024-01-canto"
+    assert slide_data["per_audit"][0]["benchmark_grade_valid"] is True
     assert "runner,agent_id,audit_id,submission_exists" in (
         output_root / "phase6-slide-data.csv"
+    ).read_text(encoding="utf-8")
+
+
+def test_phase6_summary_marks_modal_placeholder_scores_as_not_benchmark_valid(tmp_path: Path) -> None:
+    output_root = tmp_path / "phase6"
+    runner = phase6.RunnerSpec("modal-forest", "mini-swe-agent-modal-forest", "Modal forest")
+    matrix = phase6.build_run_matrix(
+        output_root=output_root,
+        scope="smoke",
+        audits=["2024-01-canto"],
+        runners=[runner],
+    )
+    phase6.write_matrix(output_root, "smoke", matrix)
+
+    run_dir = output_root / "modal-forest" / "group" / "2024-01-canto_abc"
+    (run_dir / "submission").mkdir(parents=True)
+    (run_dir / "submission" / "audit.md").write_text("# Audit\n", encoding="utf-8")
+    grade_event = {
+        "event": "[2024-01-canto] Grade:\n",
+        "grade": {
+            "evmbench_result": {
+                "audit_id": "2024-01-canto",
+                "score": 0,
+                "max_score": 2,
+                "detect_award": 0.0,
+                "detect_max_award": 5.0,
+                "details": {
+                    "modal_runner": True,
+                    "graded_in_modal_runner": False,
+                    "benchmark_grade_valid": False,
+                    "score_is_placeholder": True,
+                    "grade_source": "modal_runner_placeholder",
+                },
+            }
+        },
+    }
+    (run_dir / "run.log").write_text(str(grade_event) + "\n", encoding="utf-8")
+
+    payload = phase6.summarize_phase6(output_root)
+
+    row = payload["rows"][0]
+    assert row["submission_exists"] is True
+    assert row["score"] == 0.0
+    assert row["benchmark_grade_valid"] is False
+    assert row["score_is_placeholder"] is True
+    assert row["grade_source"] == "modal_runner_placeholder"
+    aggregate = payload["aggregate"]["modal-forest"]
+    assert aggregate["n_valid_benchmark_scores"] == 0
+    assert aggregate["n_placeholder_scores"] == 1
+    assert aggregate["valid_score"] == 0.0
+    assert aggregate["valid_max_score"] == 0.0
+    slide_data = json.loads((output_root / "phase6-slide-data.json").read_text(encoding="utf-8"))
+    assert slide_data["runner_summary"][0]["valid_benchmark_scores"] == 0
+    assert slide_data["runner_summary"][0]["placeholder_scores"] == 1
+    assert slide_data["per_audit"][0]["score_is_placeholder"] is True
+    csv_text = (output_root / "phase6-slide-data.csv").read_text(encoding="utf-8")
+    assert "benchmark_grade_valid,score_is_placeholder,grade_source" in csv_text
+    assert "modal_runner_placeholder" in csv_text
+    assert "placeholder (modal_runner_placeholder)" in (
+        output_root / "phase6-summary.md"
     ).read_text(encoding="utf-8")
 
 

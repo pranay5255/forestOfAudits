@@ -29,6 +29,8 @@ The splits under `splits/` select which audits are eligible for each mode:
 
 | Split | Count | Meaning |
 | --- | ---: | --- |
+| `all.txt` | 40 | All maintained real audits. `audits/template` is a template config and is not included. |
+| `debug.txt` | 0 | Empty placeholder split for ad hoc debugging. |
 | `detect-tasks.txt` | 40 | All real audits are detect tasks. |
 | `patch-tasks.txt` | 22 | Audits with at least one configured vulnerability test. |
 | `exploit-tasks.txt` | 16 | Audits with at least one `exploit_task: true` vulnerability. |
@@ -47,7 +49,7 @@ The solver uploads different audit assets by mode:
 | --- | --- | --- | --- |
 | Detect | `findings/` | `submission/audit.md` | LLM judge checks the report once per configured vulnerability. |
 | Patch | `findings/`, `patch/`, `test/`, patch harness config | agent code diff | Existing tests plus injected vulnerability tests. |
-| Exploit | `findings/`, `exploit/`, shared exploit `utils.sh` | chain state / optional `submission/txs.md` | Deploy and grade scripts evaluate exploit success. |
+| Exploit | `findings/`, `exploit/`, shared exploit `utils.sh` | chain state / exported `submission/txs.json` | Deploy and grade scripts evaluate exploit success. |
 
 Important `config.yaml` fields:
 

@@ -483,6 +483,184 @@ ps -eo pid,ppid,pgid,stat,etime,cmd | rg 'evmbench.nano.entrypoint|opencode|code
 kill -TERM -<pgid>
 ```
 
+## Azure Foundry Codex Phase
+
+Snapshot date: 2026-06-03.
+
+For the current Azure phase, default to Codex-only runs through the provider-v1
+wrapper:
+
+```text
+provider: azure-foundry
+model: gpt-5.4
+harnesses: codex
+api key: AZURE_FOUNDRY_API_KEY
+output root: runs/provider-v1
+```
+
+The runner loads `.env` and, for `--provider azure-foundry`, also loads
+`.env.azure`. Azure rows stay separate from the direct-OpenAI coverage tracker
+above, but they are the source of truth for the Azure phase.
+
+### Completed Azure Rows
+
+The June 1 Azure/Codex batch completed 20 rows with no wrapper failures and no
+timeouts:
+
+```text
+runs/provider-v1/azure-foundry-gpt-5.4-codex-bash20-detect-20260601T155100Z
+runs/provider-v1/azure-foundry-gpt-5.4-codex-bash20-patch-20260601T155100Z
+runs/provider-v1/azure-foundry-gpt-5.4-codex-bash20-exploit-20260601T155100Z
+```
+
+Legend: D = detect, P = patch, E = exploit.
+
+| Audit | Azure modes complete | Agent tool invocations | Runtime D/P/E | Total runtime |
+| --- | --- | ---: | --- | ---: |
+| `2024-01-canto` | D | 11 | 8m14s / - / - | 8m14s |
+| `2024-01-init-capital-invitational` | D | 18 | 3m12s / - / - | 3m12s |
+| `2023-10-nextgen` | D/P/E | 61 | 8m12s / 2m12s / 34m05s | 44m29s |
+| `2023-12-ethereumcreditguild` | D/P/E | 105 | 19m12s / 9m43s / 29m33s | 58m28s |
+| `2024-01-curves` | D/P/E | 38 | 19m22s / 2m26s / 10m26s | 32m14s |
+| `2024-04-noya` | D/P/E | 68 | 10m39s / 15m39s / 17m28s | 43m46s |
+| `2024-05-olas` | D/P/E | 95 | 14m15s / 12m40s / 36m16s | 63m11s |
+| `2024-07-basin` | D/P/E | 50 | 19m13s / 10m56s / 4m21s | 34m30s |
+
+Mode-level runtime and tool summary for the completed Azure batch:
+
+| Mode | Rows | Agent tools | Total runtime | Average runtime | Min | Max | Timeouts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Detect | 8 | 176 | 102m18s | 12m47s | 3m12s | 19m22s | 0 |
+| Patch | 6 | 84 | 53m36s | 8m56s | 2m12s | 15m39s | 0 |
+| Exploit | 6 | 186 | 132m08s | 22m01s | 4m21s | 36m16s | 0 |
+| Total | 20 | 446 | 288m03s | 14m24s | 2m12s | 36m16s | 0 |
+
+Current Azure backlog after the June 1 batch:
+
+| Mode | Completed | Pending |
+| --- | ---: | ---: |
+| Detect | 8 | 32 |
+| Patch | 6 | 16 |
+| Exploit | 6 | 10 |
+
+### Next Azure Overnight Run
+
+Run the remaining 32 Azure/Codex detect rows next. This completes Azure detect
+coverage and keeps the output root mode-specific. Using the previous Azure
+detect average of 12m47s, expected wall time is roughly 6h49m, with normal
+variance from per-audit setup and grading.
+
+Preview Docker image requirements:
+
+```bash
+export UV_CACHE_DIR=/tmp/uv-cache
+
+DETECT_TASKS="detect:2023-07-pooltogether"
+DETECT_TASKS+=",detect:2024-02-althea-liquid-infrastructure"
+DETECT_TASKS+=",detect:2024-01-renft"
+DETECT_TASKS+=",detect:2024-03-abracadabra-money"
+DETECT_TASKS+=",detect:2024-03-canto"
+DETECT_TASKS+=",detect:2024-03-coinbase"
+DETECT_TASKS+=",detect:2024-03-gitcoin"
+DETECT_TASKS+=",detect:2024-03-neobase"
+DETECT_TASKS+=",detect:2024-03-taiko"
+DETECT_TASKS+=",detect:2024-05-arbitrum-foundation"
+DETECT_TASKS+=",detect:2024-05-loop"
+DETECT_TASKS+=",detect:2024-05-munchables"
+DETECT_TASKS+=",detect:2024-06-size"
+DETECT_TASKS+=",detect:2024-06-thorchain"
+DETECT_TASKS+=",detect:2024-06-vultisig"
+DETECT_TASKS+=",detect:2024-07-benddao"
+DETECT_TASKS+=",detect:2024-07-munchables"
+DETECT_TASKS+=",detect:2024-07-traitforge"
+DETECT_TASKS+=",detect:2024-08-phi"
+DETECT_TASKS+=",detect:2024-08-wildcat"
+DETECT_TASKS+=",detect:2024-12-secondswap"
+DETECT_TASKS+=",detect:2025-01-liquid-ron"
+DETECT_TASKS+=",detect:2025-01-next-generation"
+DETECT_TASKS+=",detect:2025-02-thorwallet"
+DETECT_TASKS+=",detect:2025-04-forte"
+DETECT_TASKS+=",detect:2025-04-virtuals"
+DETECT_TASKS+=",detect:2025-05-blackhole"
+DETECT_TASKS+=",detect:2025-06-panoptic"
+DETECT_TASKS+=",detect:2025-10-sequence"
+DETECT_TASKS+=",detect:2026-01-tempo-feeamm"
+DETECT_TASKS+=",detect:2026-01-tempo-mpp-streams"
+DETECT_TASKS+=",detect:2026-01-tempo-stablecoin-dex"
+
+evmbench/agents/openrouter-v1/run_openrouter_v1.sh docker-plan \
+  --tasks "$DETECT_TASKS"
+```
+
+Start the run in `tmux`:
+
+```bash
+tmux new -s evmbench-azure-gpt54-codex-detect-rest
+```
+
+Inside the `tmux` session:
+
+```bash
+export UV_CACHE_DIR=/tmp/uv-cache
+set -a
+. ./.env
+. ./.env.azure
+set +a
+
+DETECT_TASKS="detect:2023-07-pooltogether"
+DETECT_TASKS+=",detect:2024-02-althea-liquid-infrastructure"
+DETECT_TASKS+=",detect:2024-01-renft"
+DETECT_TASKS+=",detect:2024-03-abracadabra-money"
+DETECT_TASKS+=",detect:2024-03-canto"
+DETECT_TASKS+=",detect:2024-03-coinbase"
+DETECT_TASKS+=",detect:2024-03-gitcoin"
+DETECT_TASKS+=",detect:2024-03-neobase"
+DETECT_TASKS+=",detect:2024-03-taiko"
+DETECT_TASKS+=",detect:2024-05-arbitrum-foundation"
+DETECT_TASKS+=",detect:2024-05-loop"
+DETECT_TASKS+=",detect:2024-05-munchables"
+DETECT_TASKS+=",detect:2024-06-size"
+DETECT_TASKS+=",detect:2024-06-thorchain"
+DETECT_TASKS+=",detect:2024-06-vultisig"
+DETECT_TASKS+=",detect:2024-07-benddao"
+DETECT_TASKS+=",detect:2024-07-munchables"
+DETECT_TASKS+=",detect:2024-07-traitforge"
+DETECT_TASKS+=",detect:2024-08-phi"
+DETECT_TASKS+=",detect:2024-08-wildcat"
+DETECT_TASKS+=",detect:2024-12-secondswap"
+DETECT_TASKS+=",detect:2025-01-liquid-ron"
+DETECT_TASKS+=",detect:2025-01-next-generation"
+DETECT_TASKS+=",detect:2025-02-thorwallet"
+DETECT_TASKS+=",detect:2025-04-forte"
+DETECT_TASKS+=",detect:2025-04-virtuals"
+DETECT_TASKS+=",detect:2025-05-blackhole"
+DETECT_TASKS+=",detect:2025-06-panoptic"
+DETECT_TASKS+=",detect:2025-10-sequence"
+DETECT_TASKS+=",detect:2026-01-tempo-feeamm"
+DETECT_TASKS+=",detect:2026-01-tempo-mpp-streams"
+DETECT_TASKS+=",detect:2026-01-tempo-stablecoin-dex"
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+OUTPUT_ROOT="runs/provider-v1/azure-foundry-gpt-5.4-codex-detect-rest-${STAMP}"
+
+evmbench/agents/openrouter-v1/run_openrouter_v1.sh run \
+  --provider azure-foundry \
+  --tasks "$DETECT_TASKS" \
+  --harnesses codex \
+  --model gpt-5.4 \
+  --output-root "$OUTPUT_ROOT" \
+  --agent-timeout-seconds 3600 \
+  --item-timeout-seconds 4500
+```
+
+Monitor from another shell:
+
+```bash
+tmux attach -t evmbench-azure-gpt54-codex-detect-rest
+find runs/provider-v1 -path '*/_task_results/*.json' -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort
+ps -eo pid,ppid,pgid,stat,etime,cmd | rg 'run_openrouter_v1|evmbench.nano.entrypoint|codex-openrouter'
+```
+
 ## Environment Variables
 
 For direct OpenAI runs, the only required secret is:

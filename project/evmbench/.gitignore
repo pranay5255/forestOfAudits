@@ -5,6 +5,8 @@ run_eval.log
 # Ignore everything in runs directory
 runs/
 .env
+.env.azure
+
 # Do not ignore the runs/examples/ directory and its contents
 !runs/examples/
 !runs/examples/**

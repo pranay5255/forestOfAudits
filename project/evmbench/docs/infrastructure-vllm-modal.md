@@ -234,7 +234,7 @@ Do not commit `.env`; it contains the endpoint URL and API key.
 
 ### Direct Harness Runs
 
-Run vLLM experiments through the repo-level forest-free runner:
+Run forest-free vLLM experiments through the repo-level runner:
 
 ```bash
 uv run python -m evmbench.vllm run-harness \
@@ -248,9 +248,10 @@ uv run python -m evmbench.vllm run-harness \
 
 `--harness` accepts `codex`, `opencode`, and `mini-swe-agent`. These map to
 `codex-qwen-vllm`, `opencode-qwen-vllm`, and `mini-swe-agent-qwen-vllm` and run
-`evmbench.nano.entrypoint` with `runner.concurrency=1`. This path intentionally
-bypasses `modal_forest`, forest scouts, forest judges, and Phase 6 forest shell
-wrappers while the forest looping issue is debugged separately.
+`evmbench.nano.entrypoint` with `runner.concurrency=1`. This is the canonical
+path for single-harness open-model experiments that do not need forest
+orchestration. It intentionally bypasses `modal_forest`, forest scouts, forest
+judges, and Phase 6 forest shell wrappers.
 
 Each run writes `run-manifest.json`, stdout/stderr logs, raw Prometheus metrics,
 parsed samples, summaries, poll JSONL, filtered GPU telemetry, Torch profiler

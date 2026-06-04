@@ -5,9 +5,10 @@ This guide explains the execution system behind EVMBench nano runs: how
 local Docker/Alcatraz and Modal runners differ, and how exploit-mode chains,
 `ploit`, and `veto` fit into the container topology.
 
-For the specific architecture that combines nano `n_tries` / `pass@k` with
-Modal forest test-time scaling, see
-[test-time-scaling-combination-architecture.md](test-time-scaling-combination-architecture.md).
+Test-time scaling uses nano `n_tries` as the outer independent-attempt layer.
+Modal forest is an inner strategy for a single attempt; meaningful `pass@k`
+for forest runs requires isolated `-tryN` run directories and real grading for
+each attempt.
 
 ## Mental Model
 
@@ -68,6 +69,7 @@ flowchart TD
 | Modal adapter | `evmbench/agents/modal_runner.py` | Converts agent config into a Modal runner subprocess command. |
 | Modal forest | `evmbench/agents/mini-swe-agent/modal_forest.py` | Creates scout, branch, tree judge, and global judge Modal workers. |
 | Test-time scaling combination | `evmbench/nano/eval.py`, `evmbench/agents/mini-swe-agent/modal_forest.py`, `scripts/stats.py` | Uses nano `n_tries` as the outer attempt layer and Modal forest as an inner per-attempt strategy. |
+| Harbor adapter | `evmbench/harbor_adapter/` | Generates local Harbor detect datasets, verifier glue, and a thin wrapper around the existing Modal forest runner. |
 | Exploit config | `evmbench/ploit/config.py` | Builds `ploit setup`, `ploit txs`, and `ploit exec-txs` commands. |
 | Veto | `evmbench/ploit/veto.py` | Starts/stops JSON-RPC filtering proxy inside exploit containers. |
 
@@ -350,6 +352,43 @@ flowchart TD
   LOCAL_GRADE --> FINAL["FinalResult(EVMbenchGrade)"]
   MODAL_PLACEHOLDER --> FINAL
 ```
+
+## Harbor Adapter
+
+The Harbor adapter generates local Harbor task datasets from EVMBench audit
+configs without replacing the nano path. The detect dataset generator renders
+the same audit instructions used by nano, uses `Audit.docker_image`, and honors
+`EVMBENCH_AUDIT_IMAGE_REPO` at generation time.
+
+Generate a detect dataset:
+
+```bash
+uv run python -m evmbench.harbor_adapter generate-detect-dataset \
+  --audit-id 2024-03-canto \
+  --output-dir runs/harbor-datasets/detect-smoke \
+  --overwrite
+```
+
+Run it with Harbor after installing the external Harbor CLI:
+
+```bash
+uv tool install harbor
+harbor run -p runs/harbor-datasets/detect-smoke -a "<agent>" -m "<model>"
+```
+
+Generated detect tasks expect the agent report at
+`/home/agent/submission/audit.md`. The verifier calls the existing
+`DetectGrader` and writes `/logs/verifier/reward.json` plus the full
+EVMBench grade JSON. The verifier process must be able to import EVMBench and
+its normal grading dependencies. For ad hoc local experiments,
+`--include-source` stages the `evmbench/` package under
+`/tests/evmbench-src`; the audit image or verifier environment still needs the
+Python dependencies.
+
+Forest-of-Thought is exposed as a Harbor adapter around the existing Modal
+forest runner. It remains an orchestrator wrapper rather than a Harbor
+multi-step task, and publishes forest submissions, worker metadata, and
+trajectories through Harbor artifacts.
 
 ## Detect, Patch, and Exploit Modes
 

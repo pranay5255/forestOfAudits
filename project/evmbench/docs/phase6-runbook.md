@@ -72,6 +72,23 @@ evmbench/agents/mini-swe-agent/run_phase6_variants.sh plan \
   --runners modal-forest-qwen-vllm-2trees-debug
 ```
 
+The shell wrapper loads `.env` when present, sets a default
+`MODAL_AUDIT_IMAGE_REPO`, and delegates to
+`evmbench/agents/mini-swe-agent/evaluate_phase6.py`. The Python harness builds a
+matrix, runs each matrix item sequentially through `evmbench.nano.entrypoint`,
+writes per-item command logs and status files under `_phase6_command_logs/`,
+then writes `phase6-results.json`, `phase6-summary.md`, and slide data during
+summarization.
+
+The Qwen/OpenCode vLLM Phase 6 runner groups are legacy/debug paths for the
+Phase 6 forest and Modal integration. For new forest-free open-model
+experiments, use the direct vLLM harness in
+[infrastructure-vllm-modal.md](infrastructure-vllm-modal.md):
+
+```bash
+uv run python -m evmbench.vllm run-harness --metrics --kernel-profile torch
+```
+
 ## Mini-Swe-Agent Debug Ladder
 
 Use this ladder to debug Modal and forest runs before launching a broad
@@ -275,7 +292,8 @@ globally. Stop only the local process tree or the specific sandbox you own.
 
 ## OpenCode vLLM Runs
 
-OpenCode vLLM runs use the same endpoint but a separate agent integration:
+OpenCode vLLM Phase 6 runs are part of the legacy/debug vLLM runner set. They
+use the same endpoint but a separate agent integration:
 
 ```text
 evmbench/agents/opencode/start.sh
@@ -507,8 +525,8 @@ PY
 ## Dataset Extraction
 
 After a Phase 6 root passes the success gates, extract decision and branch rows:
-Implementation details and validation rules are in
-[forest-trace-extractor-plan.md](forest-trace-extractor-plan.md).
+Usage details and validation rules are in
+[forest-trace-extractor.md](forest-trace-extractor.md).
 
 ```bash
 uv run python -m evmbench.experiments.extract_forest_traces \

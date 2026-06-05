@@ -93,6 +93,8 @@ from pathlib import Path
 from typing import Any
 
 trace_dir = Path(os.environ["CODEX_TRACE_DIR"])
+agent_dir = Path(os.environ["AGENT_DIR"])
+logs_dir = Path(os.environ["LOGS_DIR"])
 events_path = Path(os.environ["CODEX_EVENTS_PATH"])
 stderr_path = Path(os.environ["CODEX_STDERR_PATH"])
 last_message_path = Path(os.environ["CODEX_LAST_MESSAGE_PATH"])
@@ -107,6 +109,17 @@ def rel(path: Path) -> str:
         return str(path)
 
 
+def run_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(agent_dir))
+    except ValueError:
+        pass
+    try:
+        return str(Path("logs") / path.relative_to(logs_dir))
+    except ValueError:
+        return str(path)
+
+
 def sha256_file(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -115,6 +128,32 @@ def sha256_file(path: Path) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def artifact_entry(path: Path, kind: str) -> dict[str, Any]:
+    exists = path.exists()
+    return {
+        "kind": kind,
+        "path": run_rel(path),
+        "exists": exists,
+        "size_bytes": path.stat().st_size if exists and path.is_file() else 0,
+        "sha256": sha256_file(path) if exists and path.is_file() else None,
+    }
+
+
+def rollout_session_id(path: Path) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            payload = event.get("payload")
+            if event.get("type") == "session_meta" and isinstance(payload, dict) and payload.get("id"):
+                return str(payload["id"])
+            break
+    except Exception:
+        pass
+    return path.stem.removeprefix("rollout-")
 
 
 def strings_from_event(value: Any) -> list[str]:
@@ -180,6 +219,22 @@ payload = {
 }
 traj_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+rollout_paths = sorted(agent_dir.glob("sessions/**/rollout-*.jsonl"))
+raw_artifacts = [
+    artifact_entry(events_path, "codex_events_jsonl"),
+    artifact_entry(stderr_path, "codex_stderr"),
+    artifact_entry(last_message_path, "codex_last_message"),
+    artifact_entry(traj_path, "trajectory_summary"),
+]
+raw_artifacts.extend(artifact_entry(path, "codex_rollout_jsonl") for path in rollout_paths)
+sessions = [
+    {
+        "session_id": rollout_session_id(path),
+        "path": run_rel(path),
+        "parent_session_id": None,
+    }
+    for path in rollout_paths
+]
 trajectory_exists = traj_path.exists()
 stat = traj_path.stat() if trajectory_exists else None
 manifest = {
@@ -192,6 +247,10 @@ manifest = {
     "found_trajectory_count": 1 if trajectory_exists else 0,
     "missing_trajectory_count": 0 if trajectory_exists else 1,
     "missing_trajectory_workers": [] if trajectory_exists else ["codex-main"],
+    "raw_artifacts": raw_artifacts,
+    "sessions": sessions,
+    "conversation_count": len(sessions) if sessions else (1 if events_path.exists() else 0),
+    "subagent_count": 0,
     "workers": [
         {
             "worker_name": "codex-main",

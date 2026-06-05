@@ -193,6 +193,13 @@ def test_codex_openai_start_config_includes_provider_name(tmp_path: Path) -> Non
     assert 'model_providers.openai.base_url="https://api.openai.com/v1"' in args
     assert 'model_providers.openai.env_key="OPENAI_API_KEY"' in args
     assert 'model_providers.openai.wire_api="responses"' in args
+    manifest = json.loads((logs_dir / "codex" / "trajectory-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["conversation_count"] == 1
+    assert {artifact["kind"] for artifact in manifest["raw_artifacts"]} >= {
+        "codex_events_jsonl",
+        "codex_stderr",
+        "trajectory_summary",
+    }
 
 
 def test_opencode_openai_start_uses_builtin_provider_for_responses(tmp_path: Path) -> None:
@@ -676,6 +683,13 @@ def test_opencode_timeout_detect_writes_fallback_submission_and_status(tmp_path:
     assert status["submission_fallback"] is True
     manifest = json.loads((logs_dir / "opencode" / "trajectory-manifest.json").read_text(encoding="utf-8"))
     assert manifest["run_error"] == "opencode exited 130"
+    assert manifest["conversation_count"] == 1
+    assert {artifact["kind"] for artifact in manifest["raw_artifacts"]} >= {
+        "opencode_events_jsonl",
+        "opencode_stderr",
+        "opencode_status",
+        "trajectory_summary",
+    }
 
 
 def test_opencode_timeout_patch_writes_valid_nonempty_fallback_diff(tmp_path: Path) -> None:

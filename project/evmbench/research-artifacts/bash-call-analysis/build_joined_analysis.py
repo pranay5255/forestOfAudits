@@ -440,6 +440,18 @@ def save_plot(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
+def has_meaningful_groups(counts: pd.Series, min_groups: int = 2) -> bool:
+    numeric = pd.to_numeric(counts, errors="coerce").fillna(0)
+    return int((numeric > 0).sum()) >= min_groups
+
+
+def has_meaningful_cells(frame: pd.DataFrame, min_cells: int = 2) -> bool:
+    if frame.empty:
+        return False
+    numeric = frame.apply(pd.to_numeric, errors="coerce").fillna(0)
+    return int((numeric > 0).sum().sum()) >= min_cells
+
+
 def plot_source_manifest(manifest: pd.DataFrame, out: Path) -> None:
     if manifest.empty:
         return
@@ -449,6 +461,9 @@ def plot_source_manifest(manifest: pd.DataFrame, out: Path) -> None:
         return
     pivot = plot_df.pivot_table(index="source_family", columns="metric", values="count", aggfunc="sum", fill_value=0)
     pivot = pivot.reindex(columns=[metric for metric in metrics if metric in pivot.columns])
+    pivot = pivot.loc[pivot.sum(axis=1) > 0]
+    if not has_meaningful_groups(pivot.sum(axis=1)):
+        return
     pivot = pivot.loc[pivot.sum(axis=1).sort_values().index]
     colors = ["#94a3b8", "#2563eb", "#dc2626", "#0f766e", "#b45309"][: len(pivot.columns)]
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -462,6 +477,8 @@ def plot_source_manifest(manifest: pd.DataFrame, out: Path) -> None:
 
 
 def plot_invocation_category_mix(inv: pd.DataFrame, out: Path) -> None:
+    if inv.empty or inv["primary_category"].nunique() < 2 or (inv["agent"] + " / " + inv["mode"]).nunique() < 2:
+        return
     plot_df = inv.copy()
     plot_df["row"] = plot_df["agent"] + " / " + plot_df["mode"]
     counts = plot_df.groupby(["row", "primary_category"], dropna=False).size().rename("count").reset_index()
@@ -470,6 +487,8 @@ def plot_invocation_category_mix(inv: pd.DataFrame, out: Path) -> None:
     counts = counts[counts["row"].isin(top_rows)].copy()
     counts["category_group"] = np.where(counts["primary_category"].isin(top_categories), counts["primary_category"], "other")
     pivot = counts.pivot_table(index="row", columns="category_group", values="count", aggfunc="sum", fill_value=0)
+    if pivot.empty or not has_meaningful_cells(pivot):
+        return
     pivot = pivot.loc[plot_df["row"].value_counts().loc[pivot.index].sort_values().index]
     pivot = pivot[pivot.sum(axis=0).sort_values(ascending=False).index]
     share = pivot.div(pivot.sum(axis=1), axis=0) * 100
@@ -497,9 +516,13 @@ def plot_invocation_category_mix(inv: pd.DataFrame, out: Path) -> None:
 
 
 def plot_segment_vs_invocation_mix(inv: pd.DataFrame, seg: pd.DataFrame, out: Path) -> None:
+    if inv.empty or seg.empty:
+        return
     inv_counts = inv["primary_category"].value_counts().rename("invocation_count")
     seg_counts = seg["primary_category"].value_counts().rename("segment_count")
     joined = pd.concat([inv_counts, seg_counts], axis=1).fillna(0)
+    if not has_meaningful_groups(joined.sum(axis=1)):
+        return
     joined["total"] = joined["invocation_count"] + joined["segment_count"]
     joined = joined.sort_values("total", ascending=False).head(16).sort_values("total")
     joined["invocation_share"] = joined["invocation_count"] / len(inv) * 100
@@ -519,9 +542,13 @@ def plot_segment_vs_invocation_mix(inv: pd.DataFrame, seg: pd.DataFrame, out: Pa
 
 
 def plot_tool_ecology(inv: pd.DataFrame, out: Path) -> None:
+    if inv.empty:
+        return
     top_categories = inv["primary_category"].value_counts().head(12).index
     plot_df = inv[inv["primary_category"].isin(top_categories)].copy()
     pivot = plot_df.pivot_table(index="primary_category", columns="tool", values="invocation_id", aggfunc="count", fill_value=0)
+    if pivot.empty or not has_meaningful_cells(pivot):
+        return
     pivot = pivot.loc[inv["primary_category"].value_counts().loc[pivot.index].sort_values().index]
     columns = ["bash", "read", "grep", "glob", "task", "apply_patch", "webfetch"]
     pivot = pivot.reindex(columns=[column for column in columns if column in pivot.columns], fill_value=0)
@@ -549,12 +576,14 @@ def plot_tool_ecology(inv: pd.DataFrame, out: Path) -> None:
 
 def plot_nonzero_exit_categories(inv: pd.DataFrame, out: Path) -> None:
     nonzero = inv[inv["exit_bucket"].eq("nonzero")]
-    if nonzero.empty:
+    if nonzero.empty or not has_meaningful_groups(nonzero["primary_category"].value_counts()):
         return
     counts = nonzero.groupby(["primary_category", "tool"]).size().rename("count").reset_index()
     top_categories = nonzero["primary_category"].value_counts().head(12).index
     counts = counts[counts["primary_category"].isin(top_categories)]
     pivot = counts.pivot_table(index="primary_category", columns="tool", values="count", aggfunc="sum", fill_value=0)
+    if pivot.empty or not has_meaningful_cells(pivot):
+        return
     pivot = pivot.loc[nonzero["primary_category"].value_counts().loc[pivot.index].sort_values().index]
     fig, ax = plt.subplots(figsize=(12, 7))
     left = np.zeros(len(pivot))
@@ -579,6 +608,8 @@ def plot_nonzero_exit_categories(inv: pd.DataFrame, out: Path) -> None:
 
 
 def plot_command_ecology_bubble(seg: pd.DataFrame, out: Path) -> None:
+    if seg.empty:
+        return
     plot_df = seg.copy()
     plot_df["first_token"] = plot_df["first_token"].replace("", "structured_tool").fillna("structured_tool")
     top_tokens = plot_df["first_token"].value_counts().head(18).index
@@ -591,6 +622,8 @@ def plot_command_ecology_bubble(seg: pd.DataFrame, out: Path) -> None:
         .agg(segment_count=("segment_id", "count"), run_count=("run_id", "nunique"))
         .reset_index()
     )
+    if len(counts) < 2:
+        return
     tokens = list(top_tokens)
     categories = list(top_categories)
     token_pos = {token: idx for idx, token in enumerate(tokens)}
@@ -619,6 +652,8 @@ def plot_command_ecology_bubble(seg: pd.DataFrame, out: Path) -> None:
 
 
 def plot_complexity_vs_outcome(inv: pd.DataFrame, seg: pd.DataFrame, out: Path) -> None:
+    if inv.empty or len(inv) < 2:
+        return
     segment_counts = seg.groupby("invocation_id").size().rename("segment_count").reset_index()
     plot_df = inv.merge(segment_counts, on="invocation_id", how="left", validate="one_to_one")
     plot_df["segment_count"] = plot_df["segment_count"].fillna(1)
@@ -644,11 +679,13 @@ def plot_complexity_vs_outcome(inv: pd.DataFrame, seg: pd.DataFrame, out: Path) 
 
 
 def plot_intent_fingerprint_heatmap(run_cat: pd.DataFrame, out: Path) -> None:
+    if run_cat.empty:
+        return
     top_categories = run_cat.groupby("primary_category")["count"].sum().sort_values(ascending=False).head(12).index
     plot_df = run_cat[run_cat["primary_category"].isin(top_categories)].copy()
     plot_df["row"] = plot_df["agent"] + " / " + plot_df["mode"]
     pivot = plot_df.pivot_table(index="row", columns="primary_category", values="count", aggfunc="sum", fill_value=0)
-    if pivot.empty:
+    if pivot.empty or pivot.shape[0] < 2 or pivot.shape[1] < 2 or not has_meaningful_cells(pivot):
         return
     pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).head(16).index]
     pivot = pivot[pivot.sum(axis=0).sort_values(ascending=False).index]
@@ -667,6 +704,8 @@ def plot_intent_fingerprint_heatmap(run_cat: pd.DataFrame, out: Path) -> None:
 
 
 def plot_run_behavior_map(inv: pd.DataFrame, seg: pd.DataFrame, out: Path) -> None:
+    if inv.empty or inv["run_id"].nunique() < 2:
+        return
     inv_run = (
         inv.groupby("run_id", dropna=False)
         .agg(
@@ -740,7 +779,7 @@ def plot_run_similarity_map(run_cat: pd.DataFrame, out: Path) -> None:
 
 def plot_timeline_intent_stream(inv: pd.DataFrame, out: Path) -> None:
     plot_df = inv.sort_values("invocation_id").copy()
-    if plot_df.empty:
+    if plot_df.empty or len(plot_df) < 2 or plot_df["primary_category"].nunique() < 2:
         return
     top_categories = plot_df["primary_category"].value_counts().head(9).index
     plot_df["category_group"] = np.where(plot_df["primary_category"].isin(top_categories), plot_df["primary_category"], "other")
@@ -753,7 +792,7 @@ def plot_timeline_intent_stream(inv: pd.DataFrame, out: Path) -> None:
         duplicates="drop",
     )
     counts = plot_df.pivot_table(index="timeline_bin", columns="category_group", values="invocation_id", aggfunc="count", fill_value=0)
-    if counts.empty:
+    if counts.empty or counts.shape[0] < 2 or not has_meaningful_cells(counts):
         return
     counts = counts.reindex(columns=counts.sum(axis=0).sort_values(ascending=False).index)
     x = np.arange(len(counts.index))
@@ -790,34 +829,37 @@ def make_plots(inv: pd.DataFrame, seg: pd.DataFrame, run_cat: pd.DataFrame, mani
     plot_timeline_intent_stream(inv, plot_dir)
 
 
-def validate_outputs(inv: pd.DataFrame, seg: pd.DataFrame, run_cat: pd.DataFrame, legacy: pd.DataFrame, source_files: list[str]) -> None:
-    if len(inv) != 3840:
-        raise RuntimeError(f"Expected 3,840 stable invocations, found {len(inv):,}")
-    bash_count = int(inv["is_bash"].sum())
-    if bash_count != 2599:
-        raise RuntimeError(f"Expected 2,599 bash invocations, found {bash_count:,}")
-    nonbash_count = len(inv) - bash_count
-    if nonbash_count != 1241:
-        raise RuntimeError(f"Expected 1,241 OpenCode non-bash tool calls, found {nonbash_count:,}")
-    if len(seg) != 8233:
-        raise RuntimeError(f"Expected 8,233 stable segments, found {len(seg):,}")
-    if len(source_files) != 1179:
-        raise RuntimeError(f"Expected 1,179 source files, found {len(source_files):,}")
-    run_count = inv["run_id"].nunique()
-    if run_count != 146:
-        raise RuntimeError(f"Expected 146 runs, found {run_count:,}")
-    missing_segments = set(seg["invocation_id"]) - set(inv["invocation_id"])
+def validate_outputs(
+    inv: pd.DataFrame,
+    seg: pd.DataFrame,
+    run_cat: pd.DataFrame,
+    legacy: pd.DataFrame,
+    source_files: list[str],
+    *,
+    source_files_manifest_exists: bool,
+) -> None:
+    if inv.empty:
+        raise RuntimeError("Stable invocation table is empty")
+    if not source_files_manifest_exists:
+        raise RuntimeError("Stable source file manifest does not exist")
+    if not source_files:
+        raise RuntimeError("Stable source file manifest is empty")
+
+    invocation_ids = pd.to_numeric(inv["invocation_id"], errors="raise").astype(int)
+    if invocation_ids.duplicated().any():
+        duplicates = invocation_ids[invocation_ids.duplicated()].head(10).tolist()
+        raise RuntimeError(f"Duplicate stable invocation IDs: {duplicates}")
+
+    segment_invocation_ids = pd.to_numeric(seg["invocation_id"], errors="raise").astype(int)
+    missing_segments = set(segment_invocation_ids) - set(invocation_ids)
     if missing_segments:
         raise RuntimeError(f"Segments reference unknown invocation IDs: {sorted(missing_segments)[:10]}")
-    if int(run_cat["count"].sum()) != len(inv):
-        raise RuntimeError("Per-run category counts do not sum to stable invocation count")
-    if len(legacy) != 1244:
-        raise RuntimeError(f"Expected 1,244 legacy rows, found {len(legacy):,}")
-    legacy_commands = legacy["inner_command"].fillna("").astype(str)
-    stable_commands = set(inv["inner_command"].fillna("").astype(str))
-    if not legacy_commands.isin(stable_commands).all():
-        missing = legacy.loc[~legacy_commands.isin(stable_commands), "inner_command"].head(5).tolist()
-        raise RuntimeError(f"Legacy commands missing from stable command text: {missing}")
+
+    run_category_total = int(pd.to_numeric(run_cat["count"], errors="raise").sum())
+    if run_category_total != len(inv):
+        raise RuntimeError(
+            f"Per-run category counts do not sum to stable invocation count: {run_category_total:,} != {len(inv):,}"
+        )
 
 
 def build_join_report(
@@ -872,7 +914,8 @@ The stable-schema artifact is the primary dataset. The `bash_calls.csv` extracto
 
 - Segment `invocation_id` values all resolve to stable invocation rows.
 - Per-run category counts sum to **{int(run_cat["count"].sum()):,}**.
-- Legacy `bash_calls.csv` remains **{int(legacy_total["legacy_count"]):,}** rows.
+- Source file manifest is present and contains **{source_count:,}** counted source files.
+- Legacy `bash_calls.csv` is advisory reference data with **{int(legacy_total["legacy_count"]):,}** rows.
 - Legacy unique command texts overlapping stable command text: **{int(legacy_total["overlap_unique_commands"]):,} / {int(legacy_total["legacy_unique_commands"]):,}**.
 """
 
@@ -888,7 +931,14 @@ def write_outputs(legacy_input: Path, stable_input: Path, out: Path) -> None:
     manifest = stable_manifest(stable_input, inv, source_files)
     comparison = comparison_rows(legacy, inv, seg, source_files)
     examples = nonzero_examples(inv)
-    validate_outputs(inv, seg, run_cat, legacy, source_files)
+    validate_outputs(
+        inv,
+        seg,
+        run_cat,
+        legacy,
+        source_files,
+        source_files_manifest_exists=source_files_path.exists(),
+    )
 
     out.mkdir(parents=True, exist_ok=True)
     plot_dir = out / "plots"

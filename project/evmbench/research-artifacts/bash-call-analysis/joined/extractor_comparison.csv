@@ -1,29 +1,30 @@
 comparison_type,extractor_version,legacy_category,stable_category,legacy_count,stable_count,legacy_unique_commands,stable_unique_commands,overlap_unique_commands,overlap_legacy_rows,legacy_source,stable_source,stable_segment_count,source_file_count,note
-total,comparison,all,all,1244,3840,704,2369,704,1244,,,8233,1179,Stable is primary; legacy rows overlap stable command text and are not additive.
-category_mapping,comparison,blockchain_rpc_probe,onchain_state_query,144,1032,143,934,143,144,,,2529,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,build_or_test,build_test,49,104,42,77,42,49,,,114,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,code_or_file_inspection,file_read_navigation,751,1745,267,645,267,751,,,2537,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,code_search,text_search,69,342,65,290,65,69,,,377,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,file_or_repo_mutation,file_write_edit,79,202,64,154,64,79,,,319,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,other,other,34,56,33,33,33,34,,,351,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,run_orchestration,other,53,56,29,33,29,53,,,351,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,script_or_runtime,runtime_script,28,21,28,20,28,28,,,76,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,submission_output,report_submission|completion_marker,16,26,16,23,16,16,,,26,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,text_processing,runtime_script,3,21,3,20,3,3,,,76,,Mapped for comparison only; categories are not merged into one total.
-category_mapping,comparison,version_control,git_vcs,18,28,14,12,14,18,,,33,,Mapped for comparison only; categories are not merged into one total.
+total,comparison,all,all,1244,9721,704,5689,704,1244,,,22541,4602,Stable is primary; legacy rows overlap stable command text and are not additive.
+category_mapping,comparison,blockchain_rpc_probe,onchain_state_query,144,1177,143,1079,143,144,,,3018,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,build_or_test,build_test,49,290,42,224,42,49,,,335,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,code_or_file_inspection,file_read_navigation,751,5322,267,2170,267,751,,,8980,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,code_search,text_search,69,1601,65,1358,65,69,,,1755,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,file_or_repo_mutation,file_write_edit,79,393,64,237,64,79,,,656,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,other,other,34,238,33,129,33,34,,,1006,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,run_orchestration,other,53,238,29,129,29,53,,,1006,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,script_or_runtime,runtime_script,28,93,28,92,28,28,,,332,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,submission_output,report_submission|completion_marker,16,136,16,129,16,16,,,177,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,text_processing,runtime_script,3,93,3,92,3,3,,,332,,Mapped for comparison only; categories are not merged into one total.
+category_mapping,comparison,version_control,git_vcs,18,32,14,14,14,18,,,52,,Mapped for comparison only; categories are not merged into one total.
 legacy_source_type,legacy_bash_call_analysis,,,780,,,,,,agent_bash_tool,,,94,Legacy source type coverage.
 legacy_source_type,legacy_bash_call_analysis,,,411,,,,,,agent_command_execution,,,12,Legacy source type coverage.
 legacy_source_type,legacy_bash_call_analysis,,,50,,,,,,runner_command,,,31,Legacy source type coverage.
 legacy_source_type,legacy_bash_call_analysis,,,3,,,,,,modal_runner_command,,,3,Legacy source type coverage.
+stable_source_family,stable_schema,,,,5881,,,,,,project_evmbench_runs,14308,3423,Stable source family coverage.
 stable_source_family,stable_schema,,,,2480,,,,,,evmbench_runs_download,4310,1097,Stable source family coverage.
 stable_source_family,stable_schema,,,,704,,,,,,exploit_results_v3,2960,42,Stable source family coverage.
 stable_source_family,stable_schema,,,,613,,,,,,exploit_results,857,36,Stable source family coverage.
 stable_source_family,stable_schema,,,,31,,,,,,evmbench_native_runs,62,3,Stable source family coverage.
 stable_source_family,stable_schema,,,,12,,,,,,exploit_results_live_v3,44,1,Stable source family coverage.
-stable_source_format,stable_schema,,,,1012,,,,,,opencode-state-part-json,,1012,Stable source format coverage.
+stable_source_format,stable_schema,,,,4240,,,,,,opencode-state-part-json,,4240,Stable source format coverage.
+stable_source_format,stable_schema,,,,1949,,,,,,codex-run-jsonl,,90,Stable source format coverage.
+stable_source_format,stable_schema,,,,1417,,,,,,opencode-run-jsonl,,26,Stable source format coverage.
 stable_source_format,stable_schema,,,,747,,,,,,traj-action,,46,Stable source format coverage.
 stable_source_format,stable_schema,,,,613,,,,,,traj-bash-code-block,,36,Stable source format coverage.
 stable_source_format,stable_schema,,,,530,,,,,,traj-tool-call,,30,Stable source format coverage.
-stable_source_format,stable_schema,,,,475,,,,,,opencode-run-jsonl,,10,Stable source format coverage.
-stable_source_format,stable_schema,,,,411,,,,,,codex-run-jsonl,,12,Stable source format coverage.
-stable_source_format,stable_schema,,,,52,,,,,,runner-metadata-json,,33,Stable source format coverage.
+stable_source_format,stable_schema,,,,225,,,,,,runner-metadata-json,,134,Stable source format coverage.

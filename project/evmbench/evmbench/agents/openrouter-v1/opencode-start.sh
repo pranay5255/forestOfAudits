@@ -419,14 +419,25 @@ import os
 from pathlib import Path
 
 trace_dir = Path(os.environ["OPENCODE_TRACE_DIR"])
+logs_dir = Path(os.environ["LOGS_DIR"])
 traj_path = Path(os.environ["OPENCODE_TRAJ_PATH"])
 manifest_path = Path(os.environ["OPENCODE_MANIFEST_PATH"])
 status_path = Path(os.environ["OPENCODE_STATUS_PATH"])
+events_path = Path(os.environ["OPENCODE_EVENTS_PATH"])
+stderr_path = Path(os.environ["OPENCODE_STDERR_PATH"])
+state_dir = Path(os.environ["OPENCODE_STATE_DIR"])
 
 
 def rel(path: Path) -> str:
     try:
         return str(path.relative_to(trace_dir))
+    except ValueError:
+        return str(path)
+
+
+def run_rel(path: Path) -> str:
+    try:
+        return str(Path("logs") / path.relative_to(logs_dir))
     except ValueError:
         return str(path)
 
@@ -441,8 +452,65 @@ def sha256_file(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def artifact_entry(path: Path, kind: str) -> dict:
+    exists = path.exists()
+    return {
+        "kind": kind,
+        "path": run_rel(path),
+        "exists": exists,
+        "size_bytes": path.stat().st_size if exists and path.is_file() else 0,
+        "sha256": sha256_file(path) if exists and path.is_file() else None,
+    }
+
+
+def storage_artifacts() -> list[dict]:
+    entries = []
+    for storage_root in sorted(state_dir.glob("**/storage")):
+        for subdir, kind in (
+            ("session", "opencode_storage_session"),
+            ("message", "opencode_storage_message"),
+            ("part", "opencode_storage_part"),
+        ):
+            root = storage_root / subdir
+            for path in sorted(root.rglob("*.json")):
+                entries.append(artifact_entry(path, kind))
+    return entries
+
+
+def storage_sessions() -> list[dict]:
+    sessions = []
+    for storage_root in sorted(state_dir.glob("**/storage")):
+        for path in sorted((storage_root / "session").rglob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or not payload.get("id"):
+                continue
+            sessions.append(
+                {
+                    "session_id": str(payload["id"]),
+                    "parent_session_id": payload.get("parentID"),
+                    "title": payload.get("title"),
+                    "path": run_rel(path),
+                }
+            )
+    return sessions
+
+
 trajectory_exists = traj_path.exists()
 stat = traj_path.stat() if trajectory_exists else None
+state_index_path = trace_dir / "state-index.json"
+raw_artifacts = [
+    artifact_entry(events_path, "opencode_events_jsonl"),
+    artifact_entry(stderr_path, "opencode_stderr"),
+    artifact_entry(status_path, "opencode_status"),
+    artifact_entry(traj_path, "trajectory_summary"),
+]
+if state_index_path.exists():
+    raw_artifacts.append(artifact_entry(state_index_path, "opencode_state_index"))
+raw_artifacts.extend(storage_artifacts())
+sessions = storage_sessions()
 payload = {
     "manifest_version": 1,
     "run_dir": ".",
@@ -455,6 +523,10 @@ payload = {
     "found_trajectory_count": 1 if trajectory_exists else 0,
     "missing_trajectory_count": 0 if trajectory_exists else 1,
     "missing_trajectory_workers": [] if trajectory_exists else ["opencode-main"],
+    "raw_artifacts": raw_artifacts,
+    "sessions": sessions,
+    "conversation_count": len(sessions) if sessions else (1 if events_path.exists() else 0),
+    "subagent_count": sum(1 for session in sessions if session.get("parent_session_id")),
     "workers": [
         {
             "worker_name": "opencode-main",

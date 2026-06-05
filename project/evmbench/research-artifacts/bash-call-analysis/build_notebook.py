@@ -11,6 +11,7 @@ import html
 import json
 import re
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -207,6 +208,18 @@ def format_int(value: int | str | float) -> str:
         return str(value)
 
 
+def format_number(value: float) -> str:
+    if abs(value - round(value)) < 0.05:
+        return format_int(round(value))
+    return f"{value:,.1f}"
+
+
+def format_percent(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "0.0%"
+    return f"{numerator / denominator * 100:.1f}%"
+
+
 def slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "section"
 
@@ -263,6 +276,27 @@ def unique_count(table: CsvTable, column: str) -> int:
     return len({value for value in column_values(table, column) if value})
 
 
+def percentile(values: list[int], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    position = (len(ordered) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def top_value(values: list[str]) -> str:
+    normalized = [value or "unknown" for value in values]
+    if not normalized:
+        return "unknown"
+    label, count = Counter(normalized).most_common(1)[0]
+    return f"{label} ({format_int(count)} / {format_percent(count, len(normalized))})"
+
+
 def load_source_files(joined_dir: Path) -> list[str]:
     path = joined_dir / "stable_source_files.json"
     if not path.exists():
@@ -307,11 +341,71 @@ def metric_cards(tables: dict[str, CsvTable], source_files: list[str]) -> list[t
     return [
         ("Invocations/tools", format_int(len(inv.rows)), "Primary analysis grain: one retained shell invocation or structured tool call."),
         ("Bash invocations", format_int(bash_count), "Actual shell commands after de-duplication and source normalization."),
-        ("OpenCode tools", format_int(nonbash_count), "Structured non-bash tool calls retained beside shell activity."),
+        ("Non-bash tools", format_int(nonbash_count), "Structured non-bash tool calls retained beside shell activity."),
         ("Segments", format_int(len(seg.rows)), "Split shell segments plus structured-tool pseudo-segments."),
         ("Source files", format_int(len(source_files)), "Counted source files with retained invocations/tools."),
         ("Runs", format_int(run_count), "Distinct run_id values represented in the analysis."),
         ("Run-category rows", format_int(len(run_cat.rows)), "Per-run category summary rows used for behavior maps."),
+    ]
+
+
+def corpus_counts(tables: dict[str, CsvTable], source_files: list[str]) -> dict[str, int]:
+    inv = tables["stable_invocation_fact.csv"]
+    seg = tables["stable_segment_fact.csv"]
+    bash_count = sum(value.lower() == "true" for value in column_values(inv, "is_bash"))
+    return {
+        "invocations": len(inv.rows),
+        "bash": bash_count,
+        "nonbash": len(inv.rows) - bash_count,
+        "segments": len(seg.rows),
+        "source_files": len(source_files),
+        "runs": unique_count(inv, "run_id"),
+    }
+
+
+def overview_text(tables: dict[str, CsvTable], source_files: list[str]) -> str:
+    counts = corpus_counts(tables, source_files)
+    return (
+        "This page summarizes the full retained command corpus: "
+        f"{format_int(counts['invocations'])} invocations/tools, "
+        f"{format_int(counts['bash'])} bash invocations, "
+        f"{format_int(counts['nonbash'])} non-bash tool calls, "
+        f"{format_int(counts['segments'])} segments, "
+        f"{format_int(counts['source_files'])} source files, and "
+        f"{format_int(counts['runs'])} runs. "
+        "Charts are the primary reading path; tables remain available for reproducibility and row-level checks."
+    )
+
+
+def descriptive_stats_rows(tables: dict[str, CsvTable], source_files: list[str]) -> list[tuple[str, str]]:
+    inv = tables["stable_invocation_fact.csv"]
+    counts = corpus_counts(tables, source_files)
+    run_counts = Counter(value for value in column_values(inv, "run_id") if value)
+    invocations_per_run = list(run_counts.values())
+
+    exit_buckets = column_values(inv, "exit_bucket")
+    if exit_buckets:
+        nonzero_count = sum(value == "nonzero" for value in exit_buckets)
+    else:
+        nonzero_count = sum(value not in {"", "0", "0.0"} for value in column_values(inv, "exit_code"))
+
+    return [
+        ("Distinct runs", format_int(counts["runs"])),
+        ("Source files", format_int(counts["source_files"])),
+        ("Invocations/tools", format_int(counts["invocations"])),
+        ("Bash invocations", format_int(counts["bash"])),
+        ("Non-bash tool calls", format_int(counts["nonbash"])),
+        ("Segments", format_int(counts["segments"])),
+        ("Median invocations per run", format_number(percentile(invocations_per_run, 0.5))),
+        ("P90 invocations per run", format_number(percentile(invocations_per_run, 0.9))),
+        ("Max invocations per run", format_int(max(invocations_per_run, default=0))),
+        ("Top mode", top_value(column_values(inv, "mode"))),
+        ("Top agent", top_value(column_values(inv, "agent"))),
+        ("Top category", top_value(column_values(inv, "primary_category"))),
+        (
+            "Nonzero-exit count/share",
+            f"{format_int(nonzero_count)} / {format_percent(nonzero_count, len(inv.rows))}",
+        ),
     ]
 
 
@@ -410,6 +504,15 @@ def render_metric_cards(cards: list[tuple[str, str, str]], compact: bool = False
         """
         for label, value, help_text in cards
     )
+
+
+def render_descriptive_stats_table(rows: list[tuple[str, str]]) -> str:
+    parts = ['<div class="table-wrap stats-wrap"><table id="all-runs-descriptive-stats" class="data-table stats-table">']
+    parts.append("<thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>")
+    for metric, value in rows:
+        parts.append(f"<tr><td>{html_escape(metric)}</td><td>{html_escape(value)}</td></tr>")
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
 
 
 def render_plot(plot: PlotAsset, input_dir: Path) -> str:
@@ -691,6 +794,24 @@ def css() -> str:
         font-size: 13px;
         line-height: 1.4;
       }
+      .stats-block {
+        margin-top: 24px;
+      }
+      .stats-block h2 {
+        font-size: 22px;
+      }
+      .stats-wrap {
+        width: 100%;
+        margin: 12px 0 0;
+      }
+      .stats-table td:first-child {
+        color: var(--ink);
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .stats-table td:last-child {
+        font-variant-numeric: tabular-nums;
+      }
       .section-heading {
         display: flex;
         align-items: end;
@@ -916,6 +1037,7 @@ def build_html(input_dir: Path, output: Path) -> str:
     impl_bullets, impl_checks = implementation_summary(input_dir)
 
     metrics = metric_cards(tables, source_files)
+    stats_rows = descriptive_stats_rows(tables, source_files)
     manifest = tables["stable_manifest_fact.csv"]
     appendix_tables = "\n".join(render_table_panel(name, tables[name]) for name in APPENDIX_TABLES if name in tables)
     bash_tables = "\n".join(
@@ -951,10 +1073,14 @@ def build_html(input_dir: Path, output: Path) -> str:
         <section class="hero" id="overview">
           <p class="eyebrow">Total analysis</p>
           <h1>{TITLE}</h1>
-          <p class="lede">This page summarizes the full retained command corpus: 3,840 invocations/tools, 2,599 bash invocations, 1,241 OpenCode non-bash tool calls, 8,233 segments, 1,179 source files, and 146 runs. Charts are the primary reading path; tables remain available for reproducibility and row-level checks.</p>
+          <p class="lede">{html_escape(overview_text(tables, source_files))}</p>
           <p class="meta-line">Generated {generated_at} from <code>{html_escape(str(input_dir))}</code>.</p>
           <div class="metrics">
             {render_metric_cards(metrics)}
+          </div>
+          <div class="stats-block" id="all-runs-stats">
+            <h2>All Runs Descriptive Stats</h2>
+            {render_descriptive_stats_table(stats_rows)}
           </div>
         </section>
 

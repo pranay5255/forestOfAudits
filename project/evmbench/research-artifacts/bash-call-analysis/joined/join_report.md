@@ -2,33 +2,33 @@
 
 ## Primary Dataset
 
-- Stable invocations/tools: **3,840**
-- Stable bash invocations: **2,599**
-- Stable OpenCode non-bash tool calls: **1,241**
-- Stable command segments: **8,233**
-- Counted source files: **1,179**
-- Distinct runs: **146**
+- Stable invocations/tools: **9,721**
+- Stable bash invocations: **4,387**
+- Stable OpenCode non-bash tool calls: **5,334**
+- Stable command segments: **22,541**
+- Counted source files: **4,602**
+- Distinct runs: **341**
 
 The stable-schema artifact is the primary dataset. The `bash_calls.csv` extractor is retained as reference data only; its 1,244 rows overlap stable command text and must not be added to the stable totals.
 
 ## Manifest Counts
 
-- Candidate files inspected: **6,651**
-- Unique files after content de-duplication: **3,408**
-- Duplicate files skipped: **3,243**
-- Extracted stable invocations by source-family manifest: **3,840**
-- Source files with kept stable invocations: **1,179**
+- Candidate files inspected: **14,627**
+- Unique files after content de-duplication: **11,203**
+- Duplicate files skipped: **3,424**
+- Extracted stable invocations by source-family manifest: **9,721**
+- Source files with kept stable invocations: **4,602**
 
 ## Top Stable Categories
 
-- `file_read_navigation`: 1,745
-- `onchain_state_query`: 1,032
-- `text_search`: 342
-- `file_write_edit`: 202
-- `exploit_execution`: 144
-- `build_test`: 104
-- `structured_subagent`: 60
-- `shell_control_flow`: 56
+- `file_read_navigation`: 5,322
+- `text_search`: 1,601
+- `onchain_state_query`: 1,177
+- `file_write_edit`: 393
+- `build_test`: 290
+- `other`: 238
+- `structured_subagent`: 185
+- `exploit_execution`: 164
 
 ## Joined Grains
 
@@ -40,6 +40,7 @@ The stable-schema artifact is the primary dataset. The `bash_calls.csv` extracto
 ## Validation
 
 - Segment `invocation_id` values all resolve to stable invocation rows.
-- Per-run category counts sum to **3,840**.
-- Legacy `bash_calls.csv` remains **1,244** rows.
+- Per-run category counts sum to **9,721**.
+- Source file manifest is present and contains **4,602** counted source files.
+- Legacy `bash_calls.csv` is advisory reference data with **1,244** rows.
 - Legacy unique command texts overlapping stable command text: **704 / 704**.

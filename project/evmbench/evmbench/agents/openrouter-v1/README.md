@@ -39,8 +39,17 @@ it also loads `.env.azure` and aliases the Azure file without rewriting it:
 
 ```text
 API_KEY -> AZURE_FOUNDRY_API_KEY
-PROJ_ENPOINT or PROJ_ENDPOINT -> AZURE_FOUNDRY_BASE_URL
+ENDPOINT_URI, PROJ_ENPOINT, or PROJ_ENDPOINT -> AZURE_FOUNDRY_BASE_URL
 BASE_ENDPOINT -> AZURE_FOUNDRY_PROJECT_ENDPOINT
+```
+
+Pass `--env-file <path>` to load an additional dotenv file after `.env`.
+Explicit env files override earlier dotenv values. This supports Codex endpoint
+files shaped like:
+
+```text
+ENDPOINT_URI=https://.../openai/v1/responses
+API_KEY=...
 ```
 
 Provider defaults:

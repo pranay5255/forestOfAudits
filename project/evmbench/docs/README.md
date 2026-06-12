@@ -17,6 +17,7 @@ docs stay flat under `docs/`; dated snapshots and superseded plans live under
 | [forest-trace-extractor.md](forest-trace-extractor.md) | Current CLI usage, inputs, outputs, validation, redaction, and failure behavior for forest trace dataset extraction. |
 | [exploit-benchmark-guide.md](exploit-benchmark-guide.md) | How exploit-mode audits work and how to add a small exploit benchmark in parity with classic EVMBench audits. |
 | [gpt54-openrouter-runbook.md](gpt54-openrouter-runbook.md) | Direct-OpenAI GPT-5.4 runs through the OpenRouter-v1 wrapper, current coverage tracking, launch commands, setup, summarization, and troubleshooting. |
+| [gpt53-codex-runbook.md](gpt53-codex-runbook.md) | Codex-only GPT-5.3-Codex runs through the provider-v1 wrapper using `.env.codex`, including endpoint smoke, matrix chunks, tracing, and extraction. |
 
 ## Archive
 
@@ -54,6 +55,13 @@ For direct GPT-5.4 wrapper experiments:
    monitor, and summarize the run.
 3. [archive/gpt54-run-snapshots-2026-05.md](archive/gpt54-run-snapshots-2026-05.md)
    only when comparing against dated May 2026 results.
+
+For GPT-5.3-Codex wrapper experiments:
+
+1. [audit-catalog-and-modes.md](audit-catalog-and-modes.md) to confirm valid
+   modes for each audit.
+2. [gpt53-codex-runbook.md](gpt53-codex-runbook.md) to smoke the endpoint,
+   launch Codex-only chunks, and extract provider-v1 traces.
 
 ## Folded Or Archived Docs
 

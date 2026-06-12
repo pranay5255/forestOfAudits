@@ -26,6 +26,8 @@ from nanoeval_alcatraz.alcatraz_computer_interface import (
     AlcatrazComputerInterface,
     AlcatrazComputerInterfaceNoJupyter,
 )
+from typing import Literal
+
 from typing_extensions import override
 
 from evmbench.alcatraz import put_file_in_computer, put_text_in_computer, put_dir_in_computer
@@ -93,6 +95,10 @@ class EVMbenchSolver(PythonCodingSolver):
         default="high",
         doc="Reasoning effort used by EVMBench graders.",
     )
+    judge_wire_api: Literal["chat_completions", "responses"] = chz.field(
+        default="chat_completions",
+        doc="OpenAI API surface used by EVMBench graders.",
+    )
     detect_iterations: int = chz.field(default=1)
     disable_internet: bool = chz.field(default=True)
     debug_local: bool = chz.field(default=False)
@@ -103,6 +109,7 @@ class EVMbenchSolver(PythonCodingSolver):
             agent_id=self.agent_id,
             judge_model=self.judge_model,
             reasoning_effort=self.judge_reasoning_effort,
+            judge_wire_api=self.judge_wire_api,
         )
 
     def shortname(self) -> str:

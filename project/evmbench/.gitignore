@@ -6,6 +6,8 @@ run_eval.log
 runs/
 .env
 .env.azure
+.env.codex
+
 
 # Do not ignore the runs/examples/ directory and its contents
 !runs/examples/

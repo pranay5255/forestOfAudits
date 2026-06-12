@@ -236,16 +236,34 @@ def _alias_env(target: str, *sources: str) -> None:
             return
 
 
-def load_provider_environment(provider: ProviderSpec | str, *, root: Path | None = None) -> None:
+def _validate_env_var_name(value: str, *, label: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"{label} must be a valid environment variable name, got {value!r}.")
+    return value
+
+
+def load_provider_environment(
+    provider: ProviderSpec | str,
+    *,
+    root: Path | None = None,
+    env_files: list[Path] | None = None,
+) -> None:
     root = root or project_root()
     load_env_file(root / ".env")
+    for env_file in env_files or []:
+        path = env_file if env_file.is_absolute() else root / env_file
+        load_env_file(path, override=True)
     provider_spec = parse_provider(provider) if isinstance(provider, str) else provider
-    if provider_spec.provider_id != "azure-foundry":
+    if provider_spec.provider_id == "openai":
+        _alias_env("OPENAI_API_KEY", "API_KEY")
+        _alias_env("OPENAI_BASE_URL", "ENDPOINT_URI")
         return
 
+    if provider_spec.provider_id != "azure-foundry":
+        return
     load_env_file(root / ".env.azure")
     _alias_env("AZURE_FOUNDRY_API_KEY", "API_KEY")
-    _alias_env("AZURE_FOUNDRY_BASE_URL", "PROJ_ENPOINT", "PROJ_ENDPOINT")
+    _alias_env("AZURE_FOUNDRY_BASE_URL", "ENDPOINT_URI", "PROJ_ENPOINT", "PROJ_ENDPOINT")
     _alias_env("AZURE_FOUNDRY_PROJECT_ENDPOINT", "BASE_ENDPOINT")
 
 
@@ -368,6 +386,7 @@ def build_evmbench_command(
     mode: Mode,
     agent_timeout_seconds: float | None,
     judge_model: str | None = None,
+    judge_wire_api: str | None = None,
 ) -> tuple[str, ...]:
     command = [
         "uv",
@@ -389,6 +408,8 @@ def build_evmbench_command(
         command.append(f"evmbench.solver.timeout={int(agent_timeout_seconds)}")
     if judge_model:
         command.append(f"evmbench.solver.judge_model={judge_model}")
+    if judge_wire_api:
+        command.append(f"evmbench.solver.judge_wire_api={judge_wire_api}")
     return tuple(command)
 
 
@@ -403,10 +424,17 @@ def build_run_matrix(
     agent_timeout_seconds: float | None = None,
     opencode_timeout_seconds: float | None = None,
     allow_short_opencode_timeout: bool = False,
+    judge_model: str | None = None,
+    judge_wire_api: str | None = None,
+    api_key_env_var: str | None = None,
 ) -> list[OpenRouterV1Run]:
     matrix: list[OpenRouterV1Run] = []
     provider_spec = parse_provider(provider) if isinstance(provider, str) else provider
     normalized_base_url = normalize_provider_base_url(provider_spec, base_url)
+    resolved_api_key_env_var = _validate_env_var_name(
+        api_key_env_var or provider_spec.api_key_env_var,
+        label="api_key_env_var",
+    )
     for harness in harnesses:
         for model in models:
             row_agent_timeout_seconds, row_opencode_timeout_seconds = resolve_row_timeouts(
@@ -423,7 +451,7 @@ def build_run_matrix(
                     "EVMBENCH_LLM_PROVIDER": provider_spec.provider_id,
                     "EVMBENCH_LLM_MODEL": model,
                     "EVMBENCH_LLM_BASE_URL": normalized_base_url,
-                    "EVMBENCH_LLM_API_KEY_ENV": provider_spec.api_key_env_var,
+                    "EVMBENCH_LLM_API_KEY_ENV": resolved_api_key_env_var,
                 }
                 if provider_spec.provider_id == "openrouter":
                     env.update(
@@ -450,7 +478,7 @@ def build_run_matrix(
                         agent_id=harness.agent_id,
                         model=model,
                         base_url=normalized_base_url,
-                        api_key_env_var=provider_spec.api_key_env_var,
+                        api_key_env_var=resolved_api_key_env_var,
                         audit_id=task.audit_id,
                         mode=task.mode,
                         runs_dir=runs_dir,
@@ -460,7 +488,8 @@ def build_run_matrix(
                             runs_dir=runs_dir,
                             mode=task.mode,
                             agent_timeout_seconds=row_agent_timeout_seconds,
-                            judge_model=model if provider_spec.provider_id == "azure-foundry" else None,
+                            judge_model=judge_model or (model if provider_spec.provider_id == "azure-foundry" else None),
+                            judge_wire_api=judge_wire_api,
                         ),
                         env=env,
                     )
@@ -879,6 +908,11 @@ def summarize_row(
         reason = opencode_status.get("submission_fallback_reason")
         if isinstance(reason, str) and reason:
             submission_fallback_reason = reason
+    opencode_real_exit_code = opencode_status.get("real_exit_code") if isinstance(opencode_status, dict) else None
+    opencode_timed_out = bool(opencode_status.get("timed_out")) if isinstance(opencode_status, dict) else False
+    opencode_timeout_seconds = (
+        _float_or_none(opencode_status.get("timeout_seconds")) if isinstance(opencode_status, dict) else None
+    )
 
     score = _float_or_none(grade.get("score") if grade else None)
     max_score = _float_or_none(grade.get("max_score") if grade else None)
@@ -906,12 +940,8 @@ def summarize_row(
     elif not grade:
         failure_reason = "grade not found in run.log"
 
-    if isinstance(opencode_status, dict):
-        real_exit_code = opencode_status.get("real_exit_code")
-        if opencode_status.get("timed_out"):
-            failure_reason = _append_failure_reason(failure_reason, "opencode timed out")
-        elif real_exit_code not in (0, None):
-            failure_reason = _append_failure_reason(failure_reason, f"opencode exited {real_exit_code}")
+    if isinstance(opencode_status, dict) and not opencode_timed_out and opencode_real_exit_code not in (0, None):
+        failure_reason = _append_failure_reason(failure_reason, f"opencode exited {opencode_real_exit_code}")
     if submission_fallback:
         fallback_text = "fallback submission generated"
         if submission_fallback_reason:
@@ -922,6 +952,8 @@ def summarize_row(
         failure_reason = _append_failure_reason(failure_reason, "trajectory manifest not found")
     elif trajectory_manifest and missing_trajectory_count:
         failure_reason = _append_failure_reason(failure_reason, "missing trajectories")
+    if opencode_timed_out and failure_reason:
+        failure_reason = _append_failure_reason(failure_reason, "opencode timed out")
 
     return {
         "run_key": item.run_key,
@@ -954,6 +986,9 @@ def summarize_row(
         "trajectory_paths": trajectory_paths,
         "trajectory_manifest": trajectory_manifest_path,
         "opencode_status": opencode_status_path,
+        "opencode_timed_out": opencode_timed_out,
+        "opencode_real_exit_code": opencode_real_exit_code,
+        "opencode_timeout_seconds": opencode_timeout_seconds,
         "expected_trajectory_count": expected_trajectory_count,
         "found_trajectory_count": found_trajectory_count,
         "missing_trajectory_count": missing_trajectory_count,
@@ -1109,6 +1144,9 @@ def write_results_csv(output_root: Path, rows: list[dict[str, Any]]) -> Path:
         "failure_reason",
         "trajectory_manifest",
         "opencode_status",
+        "opencode_timed_out",
+        "opencode_real_exit_code",
+        "opencode_timeout_seconds",
         "expected_trajectory_count",
         "found_trajectory_count",
         "missing_trajectory_count",
@@ -1273,6 +1311,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--tasks", required=True, help="Comma-separated mode:audit_id entries.")
         subparser.add_argument("--harnesses", required=True, help="Comma-separated harnesses: codex,opencode.")
         subparser.add_argument(
+            "--env-file",
+            action="append",
+            type=Path,
+            default=[],
+            help="Additional dotenv file to load after .env. Repeatable; later files override earlier values.",
+        )
+        subparser.add_argument(
             "--model",
             action="append",
             default=[],
@@ -1283,6 +1328,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             choices=sorted(PROVIDER_SPECS),
             default=DEFAULT_PROVIDER,
             help="LLM provider to use for agent requests.",
+        )
+        subparser.add_argument(
+            "--api-key-env-var",
+            default=os.getenv("OPENROUTER_V1_API_KEY_ENV_VAR") or os.getenv("EVMBENCH_LLM_API_KEY_ENV"),
+            help="Environment variable name that contains the provider API key.",
         )
         subparser.add_argument("--base-url", default=None, help="Override the provider API base URL.")
         subparser.add_argument("--output-root", type=Path, default=None)
@@ -1302,6 +1352,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "--allow-short-opencode-timeout",
             action="store_true",
             help="Allow OpenCode process timeouts below 3600 seconds for smoke tests.",
+        )
+        subparser.add_argument(
+            "--judge-model",
+            default=os.getenv("OPENROUTER_V1_JUDGE_MODEL"),
+            help="Override the EVMBench grader model. Defaults to the Azure model for azure-foundry.",
+        )
+        subparser.add_argument(
+            "--judge-wire-api",
+            choices=["chat_completions", "responses"],
+            default=os.getenv("OPENROUTER_V1_JUDGE_WIRE_API"),
+            help="Override the OpenAI API surface used by EVMBench graders.",
         )
 
     plan_parser = subparsers.add_parser("plan", help="Print the provider command matrix.")
@@ -1354,6 +1415,9 @@ def _matrix_from_args(args: argparse.Namespace) -> tuple[Path, list[OpenRouterV1
         agent_timeout_seconds=args.agent_timeout_seconds if args.agent_timeout_seconds > 0 else None,
         opencode_timeout_seconds=args.opencode_timeout_seconds if args.opencode_timeout_seconds > 0 else None,
         allow_short_opencode_timeout=args.allow_short_opencode_timeout,
+        judge_model=args.judge_model,
+        judge_wire_api=args.judge_wire_api,
+        api_key_env_var=args.api_key_env_var,
     )
     return output_root, matrix
 
@@ -1364,7 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if hasattr(args, "provider"):
-            load_provider_environment(args.provider)
+            load_provider_environment(args.provider, env_files=args.env_file)
         if args.command == "plan":
             output_root, matrix = _matrix_from_args(args)
             print(f"# Provider v1 output root: {output_root}")

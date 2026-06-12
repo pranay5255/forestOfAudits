@@ -306,9 +306,28 @@ def test_azure_foundry_provider_uses_azure_env_and_base_url(tmp_path: Path, monk
     assert "evmbench.solver.judge_model=gpt-4.1-nano" in item.command
 
 
+def test_provider_matrix_can_select_responses_judge_wire_api(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AZURE_FOUNDRY_BASE_URL", "https://unit.services.ai.azure.com/openai/v1")
+    matrix = runner.build_run_matrix(
+        output_root=tmp_path,
+        tasks=[runner.TaskSpec(mode="detect", audit_id="2024-01-canto")],
+        harnesses=[runner.HARNESS_SPECS["codex"]],
+        models=["gpt-5.3-codex"],
+        provider="azure-foundry",
+        base_url=None,
+        judge_wire_api="responses",
+    )
+
+    item = matrix[0]
+
+    assert "evmbench.solver.judge_model=gpt-5.3-codex" in item.command
+    assert "evmbench.solver.judge_wire_api=responses" in item.command
+
+
 def test_azure_foundry_loads_env_file_aliases(tmp_path: Path, monkeypatch) -> None:
     for name in (
         "API_KEY",
+        "ENDPOINT_URI",
         "PROJ_ENPOINT",
         "PROJ_ENDPOINT",
         "BASE_ENDPOINT",
@@ -334,6 +353,55 @@ def test_azure_foundry_loads_env_file_aliases(tmp_path: Path, monkeypatch) -> No
     assert os.environ["AZURE_FOUNDRY_BASE_URL"] == "https://unit.openai.azure.com/openai/v1"
     assert os.environ["AZURE_FOUNDRY_PROJECT_ENDPOINT"] == "https://unit.services.ai.azure.com/api/projects/project-id"
     assert runner.normalize_provider_base_url("azure-foundry", None) == "https://unit.openai.azure.com/openai/v1"
+
+
+def test_azure_foundry_loads_codex_env_file_aliases(tmp_path: Path, monkeypatch, capsys) -> None:
+    for name in (
+        "API_KEY",
+        "ENDPOINT_URI",
+        "AZURE_FOUNDRY_API_KEY",
+        "AZURE_FOUNDRY_BASE_URL",
+        "AZURE_FOUNDRY_PROJECT_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+
+    env_file = tmp_path / ".env.codex"
+    env_file.write_text(
+        "API_KEY=unit-codex-key\n"
+        "ENDPOINT_URI=https://unit.services.ai.azure.com/openai/v1/responses\n",
+        encoding="utf-8",
+    )
+
+    status = runner.main(
+        [
+            "plan",
+            "--provider",
+            "azure-foundry",
+            "--env-file",
+            str(env_file),
+            "--api-key-env-var",
+            "API_KEY",
+            "--tasks",
+            "detect:2024-01-canto",
+            "--harnesses",
+            "codex",
+            "--model",
+            "gpt-5.3-codex",
+            "--output-root",
+            str(tmp_path / "runs"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert status == 0
+    assert os.environ["AZURE_FOUNDRY_API_KEY"] == "unit-codex-key"
+    assert os.environ["AZURE_FOUNDRY_BASE_URL"] == "https://unit.services.ai.azure.com/openai/v1/responses"
+    assert "provider=azure-foundry" in captured.out
+    assert "EVMBENCH_LLM_MODEL=gpt-5.3-codex" in captured.out
+    assert "EVMBENCH_LLM_BASE_URL=https://unit.services.ai.azure.com/openai/v1" in captured.out
+    assert "EVMBENCH_LLM_API_KEY_ENV=API_KEY" in captured.out
 
 
 def test_azure_foundry_plan_defaults_to_smoke_model(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -692,6 +760,37 @@ def test_opencode_timeout_detect_writes_fallback_submission_and_status(tmp_path:
     }
 
 
+def test_opencode_prompt_includes_timeout_completion_policy(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"${@: -1}\" > \"$LOGS_DIR/opencode-prompt.txt\"\n"
+        "printf '# final audit report\\n' > \"$SUBMISSION_DIR/audit.md\"\n"
+        "printf '{\"type\":\"step_finish\"}\\n'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+    env, _, _, logs_dir = _opencode_start_env(tmp_path, fake_opencode, mode="detect")
+
+    completed = subprocess.run(
+        ["bash", str(PROJECT_ROOT / "evmbench/agents/openrouter-v1/opencode-start.sh")],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    prompt = (logs_dir / "opencode-prompt.txt").read_text(encoding="utf-8")
+    assert "after 3600 seconds" in prompt
+    assert "write the required submission artifact before the deadline" in prompt
+    assert "Prefer a complete best-current submission" in prompt
+
+
 def test_opencode_timeout_patch_writes_valid_nonempty_fallback_diff(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -832,3 +931,72 @@ def test_summary_reports_opencode_timeout_fallback_from_status_json(tmp_path: Pa
     assert row["opencode_status"] == "logs/opencode/status.json"
     assert "opencode timed out" in row["failure_reason"]
     assert "fallback submission generated" in row["failure_reason"]
+
+
+def test_summary_treats_valid_opencode_timeout_as_warning(tmp_path: Path) -> None:
+    item = runner.build_run_matrix(
+        output_root=tmp_path,
+        tasks=[runner.TaskSpec(mode="detect", audit_id="2024-01-canto")],
+        harnesses=[runner.HARNESS_SPECS["opencode"]],
+        models=["gpt-5.4"],
+        provider="openai",
+        base_url=None,
+    )[0]
+    run_dir = item.runs_dir / "2026-01-01T00-00-00-GMT_run-group_opencode-openrouter-v1_detect" / "2024-01-canto_unit"
+    (run_dir / "submission").mkdir(parents=True)
+    (run_dir / "logs" / "opencode").mkdir(parents=True)
+    (run_dir / "submission" / "audit.md").write_text("# valid audit report\n", encoding="utf-8")
+    (run_dir / "run.log").write_text(
+        repr(
+            {
+                "grade": {
+                    "evmbench_result": {
+                        "score": 1,
+                        "max_score": 2,
+                        "detect_award": 1,
+                        "detect_max_award": 2,
+                        "agent_output": {"runtime_in_seconds": 7200},
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "logs" / "opencode" / "status.json").write_text(
+        json.dumps(
+            {
+                "real_exit_code": 130,
+                "effective_exit_code": 0,
+                "timeout_seconds": 7200,
+                "timed_out": True,
+                "submission_fallback": False,
+                "submission_fallback_reason": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "logs" / "opencode" / "trajectory-manifest.json").write_text(
+        json.dumps(
+            {
+                "expected_trajectory_count": 1,
+                "found_trajectory_count": 1,
+                "missing_trajectory_count": 0,
+                "submission": {"fallback": False, "fallback_reason": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = runner.summarize_row(
+        tmp_path,
+        item,
+        {"returncode": 0, "timed_out": False, "timeout_seconds": 10800},
+    )
+
+    assert row["failure_reason"] is None
+    assert row["submission_exists"] is True
+    assert row["submission_fallback"] is False
+    assert row["opencode_timed_out"] is True
+    assert row["opencode_real_exit_code"] == 130
+    assert row["opencode_timeout_seconds"] == 7200

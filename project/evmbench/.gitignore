@@ -1,6 +1,7 @@
 # Module-specific ignores
 *.pyc
 run_eval.log
+.env.azure 
 
 # Ignore everything in runs directory
 runs/

@@ -32,6 +32,9 @@ dependencies = [
 [tool.setuptools]
 packages = { find = { include = ["evmbench", "evmbench.*"] } }
 
+[project.scripts]
+evmbench-campaign = "evmbench.campaign.cli:main"
+
 [tool.pyright]
 extraPaths = ["../common/alcatraz", "../common/preparedness_turn_completer", "../common/nanoeval", "../common/nanoeval_alcatraz"]
 typeCheckingMode = "off"                                   # we use mypy

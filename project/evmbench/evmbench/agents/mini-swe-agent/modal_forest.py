@@ -233,29 +233,25 @@ def _audit_relative_path(remote_path: str) -> str:
 
 
 def _audit_scope_files(audit: Audit, mode: Mode = "detect") -> tuple[str, ...]:
-    if mode == "exploit":
-        return ()
-    files: list[str] = []
-    for vulnerability in audit.vulnerabilities:
-        for remote_path in (vulnerability.patch_path_mapping or {}).values():
-            files.append(_audit_relative_path(remote_path))
-    scoped = tuple(sorted(dict.fromkeys(files)))
-    if not scoped and mode == "patch":
-        raise RuntimeError(
-            f"Audit {audit.id} does not define patch_path_mapping entries; "
-            "modal forest cannot build patch-mode focus metadata."
-        )
-    return scoped
+    """Agent-visible scope.
+
+    Gold ``patch_path_mapping`` / ``test_path_mapping`` entries are grading data
+    and must never leak into worker instructions.  Scope therefore always comes
+    from the benchmark instructions and the repository, which means the forest
+    worker sees the full audit workspace.
+    """
+    del audit, mode
+    return ()
 
 
 def _branch_scope_files(config: ForestConfig, audit_scope_files: tuple[str, ...]) -> tuple[str, ...]:
-    if not audit_scope_files:
-        return tuple("" for _ in range(config.branches_per_tree))
-    return tuple(
-        scope_file
-        for scope_file in audit_scope_files
-        for _ in range(config.branches_per_tree)
-    )
+    """Neutral scope for every branch.
+
+    Branch count is ``branches_per_tree`` and never depends on the number of
+    audit files or gold mappings.
+    """
+    del audit_scope_files
+    return tuple("" for _ in range(config.branches_per_tree))
 
 
 def _scope_file_text(scope_files: Iterable[str]) -> str:
@@ -796,13 +792,13 @@ def _worker_specs_for_branches(
     audit_scope_files: tuple[str, ...],
 ) -> list[WorkerSpec]:
     specs: list[WorkerSpec] = []
-    branch_scopes = _branch_scope_files(config, audit_scope_files)
-    branch_count = len(branch_scopes)
+    branch_count = config.branches_per_tree
     for role in roles:
-        for index, scope_file in enumerate(branch_scopes, start=1):
+        for index in range(1, branch_count + 1):
             branch = branch_id(index)
             output_path = branch_report_remote_path(role, index)
-            spec_scope = (scope_file,) if scope_file else ()
+            # Every branch receives the same agent-visible scope.
+            spec_scope = audit_scope_files
             specs.append(
                 WorkerSpec(
                     worker_type="branch",
@@ -1102,6 +1098,12 @@ def run_modal_forest(config: ForestConfig) -> dict[str, Any]:
             f"branches_per_tree={config.branches_per_tree}"
         )
         branch_specs = _worker_specs_for_branches(config, selected_roles, audit_scope_files)
+        expected_branches = len(selected_roles) * config.branches_per_tree
+        if len(branch_specs) != expected_branches:
+            raise RuntimeError(
+                f"branch count {len(branch_specs)} != roles({len(selected_roles)}) x "
+                f"branches_per_tree({config.branches_per_tree})"
+            )
         expected_specs.extend(branch_specs)
         branch_results = _run_specs_parallel(
             config,

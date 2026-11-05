@@ -1,13 +1,19 @@
 from typing import Literal
-import chz
+
 from openai.types.shared_params.reasoning import Reasoning
-from preparedness_turn_completer.turn_completer import TurnCompleter
-from nanoeval.solvers.computer_tasks.code_execution_interface import RuntimeConfig
-from preparedness_turn_completer.oai_completions_turn_completer import OpenAICompletionsTurnCompleter
-from preparedness_turn_completer.oai_responses_turn_completer.completer import OpenAIResponsesTurnCompleter
 from preparedness_turn_completer import utils as turn_completer_utils
-from evmbench.nano.grade.base import JudgeResult
+from preparedness_turn_completer.oai_completions_turn_completer import (
+    OpenAICompletionsTurnCompleter,
+)
+from preparedness_turn_completer.oai_responses_turn_completer.completer import (
+    OpenAIResponsesTurnCompleter,
+)
+from preparedness_turn_completer.turn_completer import TurnCompleter
+
+import chz
 from alcatraz.clusters.local import ClusterConfig, LocalConfig
+from evmbench.nano.grade.base import JudgeResult
+from nanoeval.solvers.computer_tasks.code_execution_interface import RuntimeConfig
 
 turn_completer_utils.CONTEXT_WINDOW_LENGTHS.setdefault("gpt-5.3-codex", 400_000)
 
@@ -21,6 +27,14 @@ class EVMRuntimeConfig(RuntimeConfig):
 
     @chz.init_property
     def turn_completer(self) -> TurnCompleter:
+        # OpenRouter-hosted evaluators are not in the bundled context table yet;
+        # register a conservative default instead of failing campaign startup.
+        for candidate in (
+            self.judge_model,
+            self.judge_model.rsplit("/", 1)[-1],
+            f"openai/{self.judge_model.rsplit('/', 1)[-1]}",
+        ):
+            turn_completer_utils.CONTEXT_WINDOW_LENGTHS.setdefault(candidate, 400_000)
         if self.judge_wire_api == "responses":
             return OpenAIResponsesTurnCompleter(
                 model=self.judge_model,

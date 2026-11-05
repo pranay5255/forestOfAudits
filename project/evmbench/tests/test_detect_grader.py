@@ -20,3 +20,20 @@ def test_parse_judge_result_skips_empty_reasoning_message() -> None:
 
     assert result.detected is True
     assert result.reasoning == "same root cause"
+
+
+def test_parse_judge_result_recovers_json_embedded_in_prose() -> None:
+    completion = TurnCompleter.Completion(
+        input_conversation=[],
+        output_messages=[
+            ChatCompletionMessage(
+                role="assistant",
+                content='The report matches. Result: {"detected": false, "reasoning": "different code path"}',
+            ),
+        ],
+    )
+
+    result = parse_judge_result(completion)
+
+    assert result.detected is False
+    assert result.reasoning == "different code path"

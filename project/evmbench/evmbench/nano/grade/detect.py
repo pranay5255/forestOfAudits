@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import structlog
 
@@ -62,7 +63,31 @@ def parse_judge_result(completion) -> JudgeResult:
         except Exception as e:
             last_parse_error = e
 
+        # Providers that ignore response_format often return prose with an
+        # embedded JSON object.  Recover it instead of scoring zero.
+        if isinstance(content, str):
+            embedded = _extract_embedded_json(content)
+            if embedded is not None:
+                try:
+                    return JudgeResult.model_validate(embedded)
+                except Exception as e:
+                    last_parse_error = e
+
     raise ValueError("No parseable JudgeResult in judge response") from last_parse_error
+
+
+def _extract_embedded_json(text: str) -> dict | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and "detected" in value:
+            return value
+    return None
 
 
 class DetectGrader(EVMbenchGrader):

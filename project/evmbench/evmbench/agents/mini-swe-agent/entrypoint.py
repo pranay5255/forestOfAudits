@@ -12,7 +12,6 @@ RUNNERS = {
     "baseline": "modal_baseline",
     "forest": "modal_forest",
     "opencode": "modal_opencode",
-    "smoke": "modal_smoke",
 }
 
 

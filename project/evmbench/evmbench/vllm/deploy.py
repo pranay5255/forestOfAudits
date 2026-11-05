@@ -407,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         return fail(
             "VLLM_API_KEY is required in .env or via --api-key. "
-            "Run setup_vllm_modal_env.py once to create and sync it."
+            "Run `uv run python -m evmbench.vllm.setup_env` once to create and sync it."
         )
 
     try:

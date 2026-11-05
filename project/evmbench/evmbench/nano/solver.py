@@ -1,43 +1,30 @@
 import asyncio
 import json
 import os
-import shutil
 import shlex
+import shutil
 import time
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import blobfile as bf
 import structlog.stdlib
-
-import chz
-from nanoeval.eval import RolloutSystemError
-from nanoeval.recorder import get_recorder
-from nanoeval.solvers.computer_tasks.code_execution_interface import (
-    ComputerInterface,
-)
-from nanoeval.solvers.computer_tasks.solver import PythonCodingSolver
-from nanoeval.solvers.computer_tasks.steps import FinalResult, Step
-from nanoeval.solvers.computer_tasks.task import ComputerTask
 from nanoeval_alcatraz.alcatraz_computer_interface import (
     AlcatrazComputerInterface,
     AlcatrazComputerInterfaceNoJupyter,
 )
-from typing import Literal
-
 from typing_extensions import override
 
-from evmbench.alcatraz import put_file_in_computer, put_text_in_computer, put_dir_in_computer
+import chz
 from evmbench.agents.agent import Agent, AgentOutput, agent_registry
 from evmbench.agents.modal_runner import run_modal_runner
 from evmbench.agents.run import run_agent_in_computer
-from evmbench.constants import AUDIT_DIR, AGENT_DIR, SUBMISSION_DIR
-from evmbench.nano.grade import EVMbenchDetectResult, EVMbenchGrade, EVMbenchResult
-from evmbench.nano.task import EVMTask
-from evmbench.utils import get_audits_dir, purple
+from evmbench.alcatraz import put_dir_in_computer, put_file_in_computer, put_text_in_computer
+from evmbench.constants import AGENT_DIR, AUDIT_DIR, SUBMISSION_DIR
 from evmbench.nano.gateway import (
     DEFAULT_GATEWAY_HOST,
     GATEWAY_HOST_ENV,
@@ -46,7 +33,23 @@ from evmbench.nano.gateway import (
     enable_no_internet_with_gateway_local,
     verify_gateway_enforcement,
 )
+from evmbench.nano.grade import EVMbenchGrade
+from evmbench.nano.grade.modal import (
+    ComputerInterfaceTaskComputer,
+    GradeRequest,
+    grade_submission,
+)
 from evmbench.nano.runtime import EVMRuntimeConfig
+from evmbench.nano.task import EVMTask
+from evmbench.utils import get_audits_dir, purple
+from nanoeval.eval import RolloutSystemError
+from nanoeval.recorder import get_recorder
+from nanoeval.solvers.computer_tasks.code_execution_interface import (
+    ComputerInterface,
+)
+from nanoeval.solvers.computer_tasks.solver import PythonCodingSolver
+from nanoeval.solvers.computer_tasks.steps import FinalResult, Step
+from nanoeval.solvers.computer_tasks.task import ComputerTask
 
 logger = structlog.stdlib.get_logger(component=__name__)
 
@@ -185,10 +188,10 @@ class EVMbenchSolver(PythonCodingSolver):
         if agent.runner != "container":
             try:
                 agent_output = await self._run_modal_agent_without_local_computer(task, agent)
-                grade = self._modal_runner_grade(task, agent_output)
+                grade = await self._grade_modal_runner_output(task, agent_output)
                 ctx_logger.info(
-                    f"[{task.audit.id}] Modal runner completed; local benchmark grading was skipped. "
-                    f"Placeholder score: {grade.evmbench_result.score}/{grade.evmbench_result.max_score}",
+                    f"[{task.audit.id}] Modal runner completed; graded with EVMBench {task.mode} grader. "
+                    f"Score: {grade.evmbench_result.score}/{grade.evmbench_result.max_score}",
                     destinations=["group", "run"],
                     _print=True,
                 )
@@ -234,40 +237,42 @@ class EVMbenchSolver(PythonCodingSolver):
 
         yield FinalResult(grade=grade)
 
-    def _modal_runner_grade(self, task: EVMTask, agent_output: AgentOutput) -> EVMbenchGrade:
-        details = {
-            "modal_runner": True,
-            "graded_in_modal_runner": False,
-            "benchmark_grade_valid": False,
-            "score_is_placeholder": True,
-            "grade_source": "modal_runner_placeholder",
-        }
-        if task.mode == "detect":
-            result = EVMbenchDetectResult(
-                audit_id=task.audit.id,
-                score=0,
-                max_score=len(task.audit.vulnerabilities),
-                detect_award=0.0,
-                detect_max_award=task.audit.detect_max_award,
-                agent_output=agent_output,
-                details=details,
-            )
-        else:
-            result = EVMbenchResult(
-                audit_id=task.audit.id,
-                score=0,
-                max_score=len(task.audit.vulnerabilities),
-                agent_output=agent_output,
-                details=details,
-            )
-        return EVMbenchGrade(
-            score=result.score,
-            grader_log=(
-                "Modal runner completed and produced a submission; local Docker grading was skipped, "
-                "so this score is a placeholder and is not a benchmark result."
-            ),
-            evmbench_result=result,
+    async def _grade_modal_runner_output(self, task: EVMTask, agent_output: AgentOutput) -> EVMbenchGrade:
+        """Grade a Modal-runner submission with the real EVMBench graders."""
+        run_dir = Path(task.run_dir)
+        submission = run_dir / "submission" / self._submission_filename(task.mode)
+        request = GradeRequest(
+            audit=task.audit,
+            mode=task.mode,
+            submission_path=submission,
+            evaluator_model=self.judge_model,
+            run_group_id=task.run_group_id,
+            run_id=task.run_id,
+            runs_dir=task.runs_dir,
+            judge_wire_api=self.judge_wire_api,
+            reasoning_effort=self.judge_reasoning_effort,
         )
+        computer = None
+        async with AsyncExitStack() as stack:
+            if task.mode in ("patch", "exploit"):
+                # Patch and exploit grading need a fresh image-backed sandbox.
+                interface = await stack.enter_async_context(self._start_computer(task))
+                computer = ComputerInterfaceTaskComputer(
+                    interface,
+                    image=task.docker_image,
+                    loop=asyncio.get_running_loop(),
+                )
+            outcome = await asyncio.to_thread(grade_submission, request, computer=computer)
+        if not outcome.graded or outcome.grade is None:
+            raise RuntimeError(
+                f"EVMBench grading failed for {task.audit.id}: {outcome.payload.get('error')}"
+            )
+        grade = outcome.grade
+        grade.evmbench_result.agent_output = agent_output
+        grade_dir = run_dir / "grade"
+        grade_dir.mkdir(parents=True, exist_ok=True)
+        (grade_dir / "grade.json").write_text(json.dumps(outcome.to_dict(), indent=2, default=str))
+        return grade
 
     def _submission_filename(self, mode: str) -> str:
         if mode == "detect":

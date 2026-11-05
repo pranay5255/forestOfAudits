@@ -1,797 +1,289 @@
 # EVMBench
 
-EVMBench is a benchmark and execution harness for evaluating AI agents on smart
-contract security tasks. This repository now documents only EVMBench. The
-in-repo `ploit` and `veto` projects are support tools used by EVMBench for
-exploit setup, transaction extraction, and RPC filtering; they are not separate
-benchmark suites.
+EVMBench is a benchmark for smart-contract audit agents. It ships three task
+modes (detect, patch, exploit), the audit images and harness files used to
+grade them, and a campaign system for running test-time scaling experiments.
 
-EVMBench supports three task modes:
+The current implementation is the **artifact pipeline** described in
+[`docs/modal-forest-repair-plan.md`](docs/modal-forest-repair-plan.md):
 
-- `detect`: write an audit report to `submission/audit.md`.
-- `patch`: produce a patch diff for known vulnerable code.
-- `exploit`: produce executable attack transactions in `submission/txs.json`.
+```text
+backend  = local | modal
+harness  = opencode | codex | yudai
+strategy = baseline | forest
+mode     = detect | patch | exploit
+```
 
-The current Forest-of-Thought test-time scaling work targets `detect` mode.
+A campaign is one `(backend, harness, strategy, mode, task set, candidate model,
+evaluator model, budget)` tuple. Baseline and forest for the same harness use the
+same candidate model, evaluator, task set, and budget, so score comparisons and
+`pass@k` are meaningful.
 
 ## Contents
 
-- [Repository Layout](#repository-layout)
-- [Execution Architecture](#execution-architecture)
-- [Forest-of-Thought Test-Time Scaling](#forest-of-thought-test-time-scaling)
-- [Where Forest-of-Thought Is Implemented](#where-forest-of-thought-is-implemented)
-- [Getting Started](#getting-started)
-- [Build Docker Images](#build-docker-images)
-- [Configure API Keys](#configure-api-keys)
-- [Run EVMBench](#run-evmbench)
-- [Run the Baseline vs Forest Comparison](#run-the-baseline-vs-forest-comparison)
-- [Outputs](#outputs)
-- [Troubleshooting](#troubleshooting)
+- [What changed](#what-changed)
+- [Repository layout](#repository-layout)
+- [Campaign architecture](#campaign-architecture)
+- [Getting started](#getting-started)
+- [Running a campaign](#running-a-campaign)
+- [Grading](#grading)
+- [Status and failure semantics](#status-and-failure-semantics)
+- [Documentation](#documentation)
+- [Development checks](#development-checks)
 
-## Repository Layout
+## What changed
 
-| Path | Purpose |
-| --- | --- |
-| `audits/` | EVMBench audit tasks, ground-truth findings, hints, patches, exploit harnesses, and per-audit Dockerfiles. |
-| `splits/` | Task lists such as `debug`, `detect-tasks`, `patch-tasks`, and `exploit-tasks`. |
-| `evmbench/nano/` | Nanoeval task, solver, runtime, entrypoint, and grading integration. |
-| `evmbench/agents/` | Agent registry plus container, Codex, Claude, Gemini, OpenCode, and `mini-swe-agent` adapters. |
-| `evmbench/agents/mini-swe-agent/` | Local mini-swe-agent runner, Modal baseline runner, Forest-of-Thought runner, and Phase 6 comparison harness. |
-| `docker_build.py` | Builds the EVMBench base image and per-audit Docker images. |
-| `ploit/` | Helper binary used by exploit tasks. Built into `ploit-builder:latest`. |
-| `veto/` | Optional RPC filtering helper used by selected exploit tasks. |
-| `runs/` | Default output directory for benchmark logs, submissions, metadata, and Phase 6 summaries. |
+- **One execution contract.** Every stage runs in a fresh `TaskComputer`
+  (Modal sandbox, Alcatraz container, or local process). The coordinator never
+  executes candidate tools on the host.
+- **Real grading.** Detect, patch, and exploit reuse the benchmark graders.
+  There is no placeholder score path; an ungraded run is `not_graded`, not `0`.
+- **No gold leakage.** Agent-visible scope is derived only from the benchmark
+  instructions and the repository. `patch_path_mapping` / `test_path_mapping`
+  are grading data and never reach a worker.
+- **Exact branch counts.** Forest branches are `roles × branches_per_tree`,
+  independent of audit metadata.
+- **Typed artifacts.** JSON manifests, hashes, size caps, path-traversal checks,
+  and explicit `branch.diff` / `branch.txs.json` / `branch.chain.json`
+  transfer contracts.
+- **Normalized statuses.** `completed`, `failed`, `timeout`, `cancelled`,
+  `no_submission`, `contract_violation`, `preflight_failed`.
+- **Resumable campaigns.** State is written after every stage transition, with
+  idempotency keys, a durable cancel flag, and signal handlers.
 
-## Execution Architecture
-
-```mermaid
-flowchart TD
-    User[User or CI] --> Entry[evmbench.nano.entrypoint]
-    Entry --> Task[EVMTask setup]
-    Task --> Solver[EVMbenchSolver]
-
-    Solver --> AgentRegistry[Agent registry]
-    AgentRegistry --> ContainerAgent[Container runner]
-    AgentRegistry --> ModalAgent[Modal runner]
-
-    ContainerAgent --> LocalComputer[Alcatraz Docker task computer]
-    LocalComputer --> StartSh[start.sh plus AGENTS.md]
-    StartSh --> SubmissionA[submission/audit.md or agent artifacts]
-
-    ModalAgent --> ModalRunner[evmbench.agents.modal_runner]
-    ModalRunner --> MiniEntrypoint[mini-swe-agent entrypoint.py]
-    MiniEntrypoint --> ModalBaseline[Modal single-agent baseline]
-    MiniEntrypoint --> ModalForest[Modal Forest-of-Thought]
-    ModalBaseline --> ModalSubmission[modal/submission/audit.md]
-    ModalForest --> ModalSubmission
-    ModalSubmission --> SubmissionA
-
-    SubmissionA --> Grader[EVMBench grader]
-    Grader --> RunLogs[runs/]
-```
-
-EVMBench owns task construction, Docker image selection, rendered instructions,
-submission contracts, and grading. Agents own the search strategy used to
-produce the submission.
-
-## Forest-of-Thought Test-Time Scaling
-
-Forest-of-Thought is the test-time scaling strategy implemented here for smart
-contract audits. Instead of asking one agent trajectory to find every bug, the
-forest spends more inference budget at test time across independent specialist
-searches and then uses judge passes to merge only high-confidence findings.
-
-The scaling knobs are:
-
-- Breadth: number of specialist trees, controlled by `MAX_TREE_ROLES` or `--max-tree-roles`.
-- Diversity: number of independent branch workers per tree, controlled by `BRANCHES_PER_TREE` or `--branches-per-tree`.
-- Verification: tree-local judges synthesize branch reports before global review.
-- Aggregation: one global judge writes the only EVMBench-compatible final report.
-- Parallelism: Modal runs independent workers concurrently, controlled by `FOREST_WORKER_CONCURRENCY`.
-
-The budget shape is:
+## Repository layout
 
 ```text
-total_test_time_budget =
-  scout_budget
-  + selected_roles * branches_per_tree * branch_budget
-  + selected_roles * tree_judge_budget
-  + global_judge_budget
+audits/                       audit images, gold findings, hidden harness files
+evmbench/
+  agents/backend/             TaskComputer protocol + Modal/Docker/local backends
+  agents/harness/             OpenCode, Codex, Yudai adapters + preflight
+  agents/forest/              prompts, artifacts, stage pipeline
+  agents/yudai/               benchmark-owned stage launcher (runs in sandbox)
+  campaign/                   config, durable state, coordinator, CLI
+  nano/                       nanoeval task, solver, graders
+  nano/grade/modal.py         real grading over a TaskComputer
+  ploit/                      exploit transaction tooling
+tests/                        unit + adapter + pipeline + grading tests
+docs/                         canonical guides
 ```
 
-This is useful for audit tasks because different vulnerability classes require
-different reading strategies. A token-flow specialist may trace balance
-movement, an accounting specialist may stress share math, and an access-control
-specialist may inspect privileged paths. Branch workers are isolated so they can
-form independent hypotheses. Judges are then used to reduce duplicated or weak
-claims before grading.
+Legacy modules under `evmbench/agents/mini-swe-agent/` are kept as direct debug
+runners. They are not the experiment contract; use the campaign CLI.
 
-The important benchmark discipline is matched comparison: the forest should be
-compared against single-agent baselines with clear runner labels, budgets, logs,
-and grading artifacts. Phase 6 is the harness for that comparison.
+## Campaign architecture
 
-### Forest Pipeline
-
-```mermaid
-flowchart TD
-    Start[EVMBench detect task] --> Scout[Scout worker]
-    Scout --> Select[Select specialist roles]
-
-    Select --> Token[Token-flow tree]
-    Select --> Accounting[Accounting tree]
-    Select --> Access[Access-control tree]
-    Select --> Cross[Cross-contract tree]
-    Select --> Exploit[Exploitability tree]
-
-    Token --> TokenBranches[Branch workers]
-    Accounting --> AccountingBranches[Branch workers]
-    Access --> AccessBranches[Branch workers]
-    Cross --> CrossBranches[Branch workers]
-    Exploit --> ExploitBranches[Branch workers]
-
-    TokenBranches --> TokenJudge[Tree-local judge]
-    AccountingBranches --> AccountingJudge[Tree-local judge]
-    AccessBranches --> AccessJudge[Tree-local judge]
-    CrossBranches --> CrossJudge[Tree-local judge]
-    ExploitBranches --> ExploitJudge[Tree-local judge]
-
-    TokenJudge --> Global[Global judge]
-    AccountingJudge --> Global
-    AccessJudge --> Global
-    CrossJudge --> Global
-    ExploitJudge --> Global
-
-    Global --> Final[submission/audit.md]
-    Final --> Grade[EVMBench detect grading]
+```text
+scout → specialist branches → tree judges → final merger → benchmark evaluator
 ```
 
-## Where Forest-of-Thought Is Implemented
+The first forest campaign is deliberately small:
 
-The forest is wired through normal EVMBench `agent_id` selection. These are the
-main implementation points.
-
-### Agent Variants
-
-`evmbench/agents/mini-swe-agent/config.yaml` registers the full Modal baseline
-and forest variants:
-
-```yaml
-mini-swe-agent-modal-baseline:
-  <<: *common_settings
-  runner: modal_baseline
-  env_vars:
-    <<: *env-config-vars
-    MODAL_OPENAI_SECRET_NAME: openai-api-key
-
-mini-swe-agent-modal-forest:
-  <<: *common_settings
-  runner: modal_forest
-  env_vars:
-    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-    MODEL: openai/gpt-5
-    SCOUT_STEP_LIMIT: "16"
-    BRANCH_STEP_LIMIT: "36"
-    JUDGE_STEP_LIMIT: "24"
-    GLOBAL_STEP_LIMIT: "36"
-    BRANCHES_PER_TREE: "2"
-    MAX_TREE_ROLES: "4"
-    FOREST_WORKER_CONCURRENCY: "4"
+```text
+2 roles × 1 branch = 2 branch workers
++ 1 scout + 2 tree judges + 1 global merger = 6 workers
++ 1 benchmark evaluator
 ```
 
-### Solver Dispatch
+Each stage:
 
-`evmbench/nano/solver.py` chooses between the normal container path and the
-Modal path. Modal output is copied back into the EVMBench task computer so the
-standard grader remains the source of truth:
+1. gets a **fresh sandbox**,
+2. receives only its **declared parent artifacts**,
+3. runs the harness CLI **inside** the sandbox,
+4. preserves the harness-native trajectory,
+5. validates artifacts and writes a normalized `result.json`.
 
-```python
-agent = agent_registry.get_agent(self.runtime_config.agent_id)
-if agent.runner == "container":
-    await self._prepare_container_agent(computer, task, agent)
-    agent_output = await self._run_agent(computer, task)
-else:
-    agent_output = await self._run_modal_agent(computer, task, agent)
+No writable audit workspace, conversation history, or chain state crosses a
+stage boundary. The evaluator is not a forest worker and never receives the
+audit workspace.
 
-grade: EVMbenchGrade = await task.grade(computer, self.runtime_config)
-grade.evmbench_result.agent_output = agent_output
+## Getting started
+
+Python 3.11+ and Docker are required. Modal is required only for the `modal`
+backend.
+
+```bash
+uv sync --group dev
+uv run pytest tests -q
 ```
 
-### Modal Command Builder
+### Build audit images
 
-`evmbench/agents/modal_runner.py` maps agent runner types onto the
-`mini-swe-agent` entrypoint and forwards the forest budget controls:
-
-```python
-MODAL_RUNNER_COMMANDS = {
-    "modal_baseline": "baseline",
-    "modal_forest": "forest",
-}
-
-elif agent.runner == "modal_forest":
-    _append_env_flag(command, env, "--scout-step-limit", "SCOUT_STEP_LIMIT")
-    _append_env_flag(command, env, "--branch-step-limit", "BRANCH_STEP_LIMIT")
-    _append_env_flag(command, env, "--judge-step-limit", "JUDGE_STEP_LIMIT")
-    _append_env_flag(command, env, "--global-step-limit", "GLOBAL_STEP_LIMIT")
-    _append_env_flag(command, env, "--branches-per-tree", "BRANCHES_PER_TREE")
-    _append_env_flag(command, env, "--max-tree-roles", "MAX_TREE_ROLES")
-    _append_env_flag(command, env, "--worker-concurrency", "FOREST_WORKER_CONCURRENCY")
+```bash
+# First build also builds the shared base image.
+uv run python docker_build.py \
+  --audit 2024-01-canto \
+  --tag-prefix ghcr.io/<org>/evmbench/audit
 ```
 
-### Forest Orchestration
+For Modal, images must be registry-pullable (a local `evmbench/audit:<id>` tag
+is not). Push them to a registry and point `--image-repo` at that repository,
+or set `EVMBENCH_AUDIT_IMAGE_REPO`.
 
-`evmbench/agents/mini-swe-agent/modal_forest.py` runs the staged workflow:
+### Configure providers
 
-```python
-scout_result = _run_worker(config, audit, instructions, _scout_spec(config), openai_api_key=openai_api_key)
-worker_results.append(scout_result)
-
-scout_decision, selected_roles = _select_roles(config)
-
-branch_results = _run_specs_parallel(
-    config,
-    audit,
-    instructions,
-    _worker_specs_for_branches(config, selected_roles),
-    openai_api_key=openai_api_key,
-)
-
-tree_judge_results = _run_specs_parallel(
-    config,
-    audit,
-    instructions,
-    _worker_specs_for_tree_judges(config, selected_roles),
-    openai_api_key=openai_api_key,
-)
-
-global_result = _run_worker(
-    config,
-    audit,
-    instructions,
-    _global_judge_spec(config, selected_roles),
-    openai_api_key=openai_api_key,
-)
+```bash
+export OPENROUTER_API_KEY=...
+export EVMBENCH_AUDIT_IMAGE_REPO=ghcr.io/<org>/evmbench/audit
+# Modal only:
+modal token set
 ```
 
-### Specialist Roles
+Campaign defaults:
 
-`evmbench/agents/mini-swe-agent/scout.py` defines the initial forest role set:
+- candidate model: `deepseek/deepseek-v4.1-flash-1017`
+- detect evaluator: `openai/gpt-6-luna`
+- harness pins: Codex `0.164.0`, OpenCode `1.19.4`, Yudai commit
+  `5a5541251a48da685a5b0bc2a00596771c7ded07`
 
-```python
-TREE_ROLES = {
-    "token-flow": TreeRole(...),
-    "accounting": TreeRole(...),
-    "access-control": TreeRole(...),
-    "cross-contract": TreeRole(...),
-    "exploitability": TreeRole(...),
+Stock audit images may ship older harness versions, so build a pinned image:
+
+```bash
+scripts/build_harness_image.sh \
+  --base evmbench/audit:2024-03-gitcoin \
+  --output evmbench/audit:2024-03-gitcoin-fullpin --yudai
+```
+
+Preflight checks the installed versions and fails on mismatch. Provider routing
+defaults to OpenRouter, including `openai/...` aliases; set
+`EVMBENCH_MODEL_PROVIDER=openai` for direct OpenAI. See
+[docs/harness-validation.md](docs/harness-validation.md) for the validated
+OpenCode/Codex/Yudai matrix.
+
+## Running a campaign
+
+The CLI is the only supported campaign entry point.
+
+```bash
+# 1. Plan: validate config and print worker/sandbox/budget counts. No sandboxes.
+uv run evmbench-campaign plan \
+  --backend modal --harness opencode --strategy forest --mode detect \
+  --audits 2024-01-canto --tree-roles accounting,token-flow \
+  --branches-per-tree 1
+
+# 2. Preflight: prove the harness does multiple tool turns and writes a file.
+uv run evmbench-campaign preflight --campaign-id <id> --refresh
+
+# 3. Run: spawn the detached coordinator, return the campaign id immediately.
+uv run evmbench-campaign run --campaign-id <id>
+
+# 4. Observe without attaching.
+uv run evmbench-campaign status --campaign-id <id>
+uv run evmbench-campaign summarize --campaign-id <id>
+
+# 5. Cancel and resume.
+uv run evmbench-campaign cancel --campaign-id <id>
+uv run evmbench-campaign resume --campaign-id <id>
+```
+
+All commands accept `--output-dir <root>` (default `runs/campaigns`) and either
+flags or `--config <json>`.
+
+Campaign state:
+
+```text
+campaigns/<campaign_id>/
+  campaign.json
+  events.jsonl
+  summary.json
+  cancel.requested              # durable cancel flag
+  tasks/<task_id>/attempts/<attempt_id>/
+    attempt.json
+    stages/<stage>/<worker_id>/{spec.json,result.json,artifacts/}
+    submission/{audit.md|agent.diff|txs.json}
+    grade/grade.json
+```
+
+### Baselines
+
+Use the same flags with `--strategy baseline`. Baseline is a single worker that
+writes the final submission directly. Both strategies grade with the same grader.
+
+### Mode contracts
+
+| Mode | Branch artifact | Final submission |
+| --- | --- | --- |
+| detect | `branch.md`, optional `findings.json` | `submission/audit.md` |
+| patch | `branch.md`, `branch.diff` | `submission/agent.diff` |
+| exploit | `branch.md`, `branch.txs.json`, `branch.chain.json` | `submission/txs.json` |
+
+Patch diffs are captured with
+`git -c core.fileMode=false diff --binary <base_commit>`. Exploit bundles are
+branch-local and are never concatenated; the merger replays or re-executes one
+coherent strategy on a fresh chain and records
+`chain_isolation = "sidecar" | "single_sandbox"`.
+
+## Grading
+
+Grading is a separate stage after the final merger.
+
+- **Detect:** `DetectGrader` over `submission/audit.md`, evaluator
+  `openai/gpt-6-luna` via OpenRouter's OpenAI-compatible endpoint.
+- **Patch:** fresh grading sandbox, base commit checkout, `git apply --binary
+  --index --reject`, restore protected tests, invariant suite, per-vulnerability
+  tests.
+- **Exploit:** fresh grading sandbox, `ploit setup`, `ploit exec-txs`,
+  `grade.sh`, parse `grade.json`.
+
+Grading sandboxes receive only the submission, the hidden harness files the
+grader uploads, the audit image, and the base commit. Provenance is written to
+`grade/grade.json`:
+
+```json
+{
+  "grade_source": "evmbench_detect",
+  "grader_version": 1,
+  "evaluator_model": "openai/gpt-6-luna",
+  "submission_sha256": "...",
+  "grading_sandbox_id": "...",
+  "score_is_placeholder": false
 }
 ```
 
-### Final Submission Contract
+A grader failure is recorded with `"graded": false`, not a successful zero.
 
-`evmbench/agents/mini-swe-agent/judge.py` keeps branch outputs separate and
-allows only the global judge to write the final graded report:
+## Status and failure semantics
 
-```python
-FOREST_DIR = "/home/agent/forest"
-FINAL_SUBMISSION_PATH = "/home/agent/submission/audit.md"
-
-def branch_report_remote_path(role: TreeRole, branch_index: int) -> str:
-    return f"{FOREST_DIR}/{role.name}/{branch_id(branch_index)}/branch.md"
-
-def tree_judge_remote_path(role: TreeRole) -> str:
-    return f"{FOREST_DIR}/{role.name}/judge.md"
-```
-
-## Getting Started
-
-Run all commands from the repository root.
-
-### Prerequisites
-
-- Python 3.11 or newer.
-- `uv`.
-- Docker with build access.
-- Modal CLI/account for Modal baseline and forest runs.
-- An OpenAI API key for Codex and `mini-swe-agent` runs.
-- Optional provider keys for non-OpenAI agents.
-
-Install Python dependencies:
-
-```bash
-uv sync
-```
-
-Check that the main entrypoints import:
-
-```bash
-uv run python -m evmbench.nano.entrypoint --help
-uv run python evmbench/agents/mini-swe-agent/entrypoint.py baseline --help
-uv run python evmbench/agents/mini-swe-agent/entrypoint.py forest --help
-```
-
-## Build Docker Images
-
-EVMBench uses one base image plus one image per audit. The base image depends on
-the local `ploit-builder:latest` image, so build that first.
-
-### 1. Build `ploit-builder`
-
-```bash
-docker build -f ploit/Dockerfile -t ploit-builder:latest --target ploit-builder .
-```
-
-### 2. Build local audit images
-
-For the fastest smoke, build only the debug split:
-
-```bash
-uv run docker_build.py --split debug
-```
-
-For the Forest-of-Thought comparison, build detect images:
-
-```bash
-uv run docker_build.py --split detect-tasks
-```
-
-For every EVMBench task image:
-
-```bash
-uv run docker_build.py --split all
-```
-
-Build one audit when debugging:
-
-```bash
-uv run docker_build.py --no-build-base --audit 2024-01-canto
-```
-
-If Docker build networking is flaky, use host networking or a different Ubuntu
-mirror:
-
-```bash
-uv run docker_build.py --split detect-tasks --build-network host
-uv run docker_build.py --split detect-tasks --ubuntu-mirror http://mirrors.edge.kernel.org/ubuntu
-```
-
-### 3. Build registry-pullable images for Modal
-
-Modal workers cannot pull local Docker tags. Push audit images to a registry and
-point the Phase 6 wrappers at that repository.
-
-Example using GHCR:
-
-```bash
-export MODAL_AUDIT_IMAGE_REPO=ghcr.io/YOUR_GHCR_OWNER/evmbench-audit
-uv run docker_build.py --split detect-tasks --tag-prefix "$MODAL_AUDIT_IMAGE_REPO" --build-network host
-```
-
-Push the tags you plan to run. For the default `first5` comparison, the audit
-IDs are:
-
-```text
-2023-07-pooltogether
-2023-10-nextgen
-2023-12-ethereumcreditguild
-2024-01-canto
-2024-01-curves
-```
-
-Push one tag like this:
-
-```bash
-docker push "$MODAL_AUDIT_IMAGE_REPO:2023-07-pooltogether"
-```
-
-Push the remaining selected tags the same way. If you do not set
-`MODAL_AUDIT_IMAGE_REPO`, `run_phase6_variants.sh` defaults to
-`ghcr.io/pranay5255/evmbench-audit`.
-
-## Configure API Keys
-
-Create a local `.env` file:
-
-```bash
-OPENAI_API_KEY=sk-...
-
-# Optional, only needed for these agent families.
-ANTHROPIC_API_KEY=...
-GEMINI_API_KEY=...
-OPENROUTER_API_KEY=...
-
-# Required for Modal runs unless you are using the wrapper default.
-MODAL_AUDIT_IMAGE_REPO=ghcr.io/YOUR_GHCR_OWNER/evmbench-audit
-```
-
-Load it in your shell:
-
-```bash
-set -a
-. ./.env
-set +a
-```
-
-Set up Modal and create the secret expected by
-`mini-swe-agent-modal-baseline`:
-
-```bash
-modal setup
-modal secret create openai-api-key OPENAI_API_KEY="$OPENAI_API_KEY"
-```
-
-### Self-host Qwen vLLM on Modal
-
-`evmbench.vllm` is the canonical repo-level surface for the reusable
-OpenAI-compatible vLLM endpoint. The old mini-swe-agent vLLM files remain as
-compatibility wrappers, but new commands should use `uv run python -m
-evmbench.vllm ...`.
-
-The default deployment serves `Qwen/Qwen3.6-35B-A3B-FP8` on one H100 with a
-32K context window, Qwen reasoning parsing, prefix caching, MTP speculative
-decoding, and `/v1/chat/completions` compatibility.
-
-Set up local `.env` values and the Modal secret:
-
-```bash
-uv run python -m evmbench.vllm setup-env
-```
-
-Deploy and verify the endpoint:
-
-```bash
-uv run python -m evmbench.vllm deploy --write-env
-```
-
-Deploy the compatibility gateway in front of that raw vLLM endpoint and rewrite `VLLM_API_BASE` to the gateway while preserving the raw endpoint as `VLLM_UPSTREAM_API_BASE`:
-
-```bash
-uv run python -m evmbench.vllm deploy-gateway --upstream-api-base "$VLLM_API_BASE" --write-env
-```
-
-Use a single H100 with the FP8 checkpoint explicitly:
-
-```bash
-uv run python -m evmbench.vllm deploy --gpu H100 --chat-template-mode qwen-codex-compat --write-env
-```
-
-Use two H100s with an explicit opt-in:
-
-```bash
-VLLM_ALLOW_EXPENSIVE_GPU=1 \
-uv run python -m evmbench.vllm deploy --gpu H100:2 --allow-expensive-gpu --write-env
-```
-
-Verify an already deployed endpoint without redeploying:
-
-```bash
-uv run python -m evmbench.vllm verify
-```
-
-Validate parser and tool-call compatibility before running an agent harness. This writes raw request/response artifacts plus `compatibility-summary.json` under `runs/vllm-compat/` and fails if Chat Completions tool calls or the Responses API probe do not pass:
-
-```bash
-uv run python -m evmbench.vllm compat-smoke
-```
-
-Collect one raw Prometheus metrics snapshot from `/metrics`:
-
-```bash
-uv run python -m evmbench.vllm metrics snapshot
-```
-
-Run one forest-free EVMBench task against vLLM. The command records a
-`run-manifest.json`, stdout/stderr logs, raw `.prom` metrics snapshots, parsed
-sample JSON, summaries, filtered GPU telemetry, Torch profiler indexes, and a
-`metrics/metrics-manifest.json` under the run directory.
-
-```bash
-uv run python -m evmbench.vllm run-harness \
-  --harness codex \
-  --mode detect \
-  --audit-id 2024-01-canto \
-  --metrics \
-  --metrics-interval-seconds 5 \
-  --kernel-profile torch
-```
-
-Supported direct harnesses are `codex`, `opencode`, and `mini-swe-agent`, which
-map to `codex-qwen-vllm`, `opencode-qwen-vllm`, and
-`mini-swe-agent-qwen-vllm`. This path does not use `modal_forest`, forest
-scouts, forest judges, or Phase 6 forest wrappers.
-
-OpenCode vLLM smoke defaults are intentionally conservative: the wrapper
-declares a 32K context window, caps output at 1024 tokens, reserves 4096 tokens
-for compaction, and lets OpenCode receive usage data. This avoids known local
-vLLM/OpenAI-compatible edge cases tracked upstream in `anomalyco/opencode`
-#9611, #20078, #29363, #26412, #16488, and PR #24914.
-
-For open-model experiments, including the canonical Qwen3.6-27B 8xH100
-long-context command with YaRN, GPU telemetry, and Torch profiling, see
-`vllmModel/README.md`.
-
-Useful deployment overrides:
-
-```bash
-# Previous exact-BF16 default if you want to compare B200 against 2x A100-80GB.
-VLLM_MODAL_GPU=A100-80GB:2 \
-VLLM_TENSOR_PARALLEL_SIZE=2 \
-uv run python -m evmbench.vllm deploy --allow-expensive-gpu
-
-# More context on more GPUs.
-VLLM_MODAL_GPU=H100:4 \
-VLLM_TENSOR_PARALLEL_SIZE=4 \
-VLLM_MAX_MODEL_LEN=131072 \
-uv run python -m evmbench.vllm deploy --allow-expensive-gpu
-
-# Lower cost/faster cold starts if the FP8 model is acceptable.
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B-FP8 \
-VLLM_SERVED_MODEL_NAME=Qwen/Qwen3.6-35B-A3B-FP8 \
-VLLM_MODAL_GPU=H100:1 \
-VLLM_TENSOR_PARALLEL_SIZE=1 \
-uv run python -m evmbench.vllm deploy --allow-expensive-gpu
-```
-
-The Phase 6 shell wrappers load `.env` automatically when it exists.
-
-## Run EVMBench
-
-### Harness smoke with the no-op human agent
-
-This verifies Docker setup and grading without spending model budget:
-
-```bash
-uv run python -m evmbench.nano.entrypoint \
-  evmbench.audit_split=debug \
-  evmbench.mode=detect \
-  evmbench.apply_gold_solution=False \
-  evmbench.log_to_run_dir=True \
-  evmbench.solver=evmbench.nano.solver.EVMbenchSolver \
-  evmbench.solver.agent_id=human \
-  runner.concurrency=1
-```
-
-### Single real-agent run
-
-Example Codex detect run on one audit:
-
-```bash
-uv run python -m evmbench.nano.entrypoint \
-  evmbench.audit=2024-01-canto \
-  evmbench.mode=detect \
-  evmbench.hint_level=none \
-  evmbench.log_to_run_dir=True \
-  evmbench.solver=evmbench.nano.solver.EVMbenchSolver \
-  evmbench.solver.agent_id=codex-default \
-  runner.concurrency=1
-```
-
-### Useful configuration switches
-
-| Setting | Values |
+| Condition | Status |
 | --- | --- |
-| `evmbench.mode` | `detect`, `patch`, `exploit` |
-| `evmbench.audit` | One audit ID, such as `2024-01-canto` |
-| `evmbench.audit_split` | `debug`, `detect-tasks`, `patch-tasks`, `exploit-tasks`, `all` |
-| `evmbench.hint_level` | `none`, `low`, `med`, `high`, `max` |
-| `evmbench.apply_gold_solution` | `True` for harness validation, `False` for real agent runs |
-| `evmbench.solver.agent_id` | Any ID registered in `evmbench/agents/**/config.yaml` |
-| `runner.concurrency` | Number of EVMBench tasks to run concurrently |
+| exit 0, expected artifacts valid, contract checks pass | `completed` |
+| non-zero exit (even with artifacts) | `failed` |
+| time limit exceeded | `timeout` |
+| cancellation requested | `cancelled` |
+| exit 0 but a required artifact is missing/empty | `no_submission` |
+| forbidden artifact or missing required trajectory | `contract_violation` |
+| preflight did not exercise multiple turns + a file write | `preflight_failed` |
 
-## Run the Baseline vs Forest Comparison
+Coordinator exit codes: `0` only when every task produced a real grade, `1` for
+task/cancel/ungraded failures, `2` for invalid config or preflight failure.
 
-The Phase 6 comparison harness is:
+`continue_on_worker_error` lets downstream stages run with missing parents, but
+the attempt is reported as `degraded`, never as a clean result.
 
-```text
-evmbench/agents/mini-swe-agent/evaluate_phase6.py
-```
+## Documentation
 
-The recommended wrapper is:
+- [docs/README.md](docs/README.md) — documentation map.
+- [docs/campaign-runbook.md](docs/campaign-runbook.md) — full CLI runbook,
+  budgets, harness pins, and troubleshooting.
+- [docs/experiment-matrix.md](docs/experiment-matrix.md) — matched-budget
+  protocol, metrics, and sweep order for beating the baseline.
+- [docs/system-architecture.md](docs/system-architecture.md) — nanoeval,
+  container, ploit/Veto, and grading diagrams.
+- [docs/audit-catalog-and-modes.md](docs/audit-catalog-and-modes.md) — audit
+  layout, splits, and mode behavior.
+- [docs/exploit-benchmark-guide.md](docs/exploit-benchmark-guide.md) — how
+  exploit-mode audits work.
+- [docs/modal-forest-repair-plan.md](docs/modal-forest-repair-plan.md) — the
+  design and acceptance gates this implementation follows.
 
-```text
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh
-```
-
-It loads `.env`, sets a default `MODAL_AUDIT_IMAGE_REPO`, and forwards to the
-Python harness.
-
-### Runner groups
-
-| Group | Runners |
-| --- | --- |
-| `presentation` | `codex-default`, `modal-baseline`, `modal-forest` |
-| `smoke` | `codex-default`, `mini-smoke-10`, `modal-baseline-smoke-10`, `modal-forest-smoke` |
-| `modal-debug` | Modal smoke runners plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
-| `forest-debug` | `modal-forest-smoke` plus GPT-5.2 Codex 2-tree and 4-tree forest debug |
-| `vllm` | legacy Qwen vLLM Phase 6 variants; prefer `evmbench.vllm run-harness` for new open-model experiments |
-| `modal` | `modal-baseline`, `modal-forest` |
-| `local` | local `mini-swe-agent` variants |
-| `all` | every registered Phase 6 variant |
-
-List every runner:
+## Development checks
 
 ```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh variants
-```
-
-Preview the smoke matrix:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh plan --scope smoke --runners smoke
-```
-
-Run the low-budget smoke comparison:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope smoke --runners smoke --stop-on-failure
-```
-
-Preview the default five-audit baseline comparison:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh plan --scope first5 --runners presentation
-```
-
-Run the default comparison:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope first5 --runners presentation --stop-on-failure
-```
-
-Run only the Modal forest:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope first5 --runners modal-forest --stop-on-failure
-```
-
-For debugging, prefer a single audit and a per-item timeout before running a
-wide matrix:
-
-```bash
-PHASE6_ITEM_TIMEOUT_SECONDS=7200 \
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh run \
-  --audits 2024-01-canto \
-  --runners modal-forest-gpt52-codex-2trees-debug \
-  --stop-on-failure
-```
-
-Summarize an existing run:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh summarize --output-root runs/phase6/RUN_ID
-```
-
-### Phase 6 Comparison Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Wrapper as run_phase6_variants.sh
-    participant Phase6 as evaluate_phase6.py
-    participant Bench as evmbench.nano.entrypoint
-    participant Solver as EVMbenchSolver
-    participant Modal as Modal runners
-    participant Grade as EVMBench grader
-
-    User->>Wrapper: run --scope first5 --runners presentation
-    Wrapper->>Phase6: load .env and build matrix
-    Phase6->>Bench: codex-default audit run
-    Phase6->>Bench: modal-baseline audit run
-    Phase6->>Bench: modal-forest audit run
-    Bench->>Solver: setup task computer
-    Solver->>Modal: dispatch baseline or forest when agent runner is Modal
-    Modal-->>Solver: modal/submission/audit.md
-    Solver->>Grade: copy submission and grade normally
-    Grade-->>Phase6: run.log grade event
-    Phase6-->>User: phase6-results.json, summary, slide data
-```
-
-## Outputs
-
-Normal EVMBench runs write under `runs/`. Phase 6 writes a timestamped output
-root under `runs/phase6/` unless `--output-root` is provided.
-
-```mermaid
-flowchart LR
-    Root[runs/phase6/timestamp] --> Matrix[phase6-run-matrix.json]
-    Root --> CommandLogs[_phase6_command_logs]
-    Root --> RunnerDirs[runner directories]
-    Root --> Results[phase6-results.json]
-    Root --> Summary[phase6-summary.md]
-    Root --> SlideJson[phase6-slide-data.json]
-    Root --> SlideCsv[phase6-slide-data.csv]
-
-    RunnerDirs --> RunDir[group/audit_run]
-    RunDir --> RunLog[run.log]
-    RunDir --> Submission[submission/audit.md]
-    RunDir --> ModalDir[modal]
-    ModalDir --> ModalLogs[logs]
-    ModalLogs --> BaselineMeta[modal-baseline-result.json]
-    ModalLogs --> ForestMeta[modal-forest-result.json]
-    ModalLogs --> Trajectories[*.traj.json]
-```
-
-Important files:
-
-| File | Purpose |
-| --- | --- |
-| `submission/audit.md` | Grading source of truth for detect mode. |
-| `run.log` | EVMBench task events and grade payloads. |
-| `modal/logs/modal-runner-command.json` | Exact Modal command emitted by the adapter. |
-| `modal/logs/modal-baseline-result.json` | Baseline metadata, runtime, and optional grade. |
-| `modal/logs/modal-forest-result.json` | Forest roles, worker metadata, errors, and runtimes. |
-| `phase6-results.json` | Canonical structured comparison results. |
-| `phase6-summary.md` | Human-readable aggregate and per-audit summary. |
-| `phase6-slide-data.json` | Chart-ready data for presentations. |
-| `phase6-slide-data.csv` | Spreadsheet-friendly per-audit rows. |
-
-## Troubleshooting
-
-### `OPENAI_API_KEY` is not set
-
-Load `.env` in the shell before running direct Python commands:
-
-```bash
-set -a
-. ./.env
-set +a
-```
-
-For Modal, also create the Modal secret:
-
-```bash
-modal secret create openai-api-key OPENAI_API_KEY="$OPENAI_API_KEY"
-```
-
-### Modal cannot pull an audit image
-
-Use a registry tag, not a local Docker tag:
-
-```bash
-export MODAL_AUDIT_IMAGE_REPO=ghcr.io/YOUR_GHCR_OWNER/evmbench-audit
-uv run docker_build.py --audit 2024-01-canto --tag-prefix "$MODAL_AUDIT_IMAGE_REPO"
-docker push "$MODAL_AUDIT_IMAGE_REPO:2024-01-canto"
-```
-
-### Docker build cannot reach Ubuntu mirrors
-
-Use:
-
-```bash
-uv run docker_build.py --split detect-tasks --build-network host
-```
-
-or:
-
-```bash
-uv run docker_build.py --split detect-tasks --ubuntu-mirror http://mirrors.edge.kernel.org/ubuntu
-```
-
-### Modal baseline works but forest is too expensive
-
-Lower the forest knobs in `.env` or in `config.yaml`:
-
-```bash
-BRANCHES_PER_TREE=1
-MAX_TREE_ROLES=2
-FOREST_WORKER_CONCURRENCY=2
-BRANCH_STEP_LIMIT=10
-GLOBAL_STEP_LIMIT=10
-```
-
-Then run:
-
-```bash
-evmbench/agents/mini-swe-agent/run_phase6_variants.sh run --scope smoke --runners modal-forest-smoke --stop-on-failure
-```
-
-## Development Checks
-
-Focused tests for the mini-swe-agent Modal and Phase 6 path:
-
-```bash
-uv run pytest tests/test_mini_swe_agent_phase5.py tests/test_mini_swe_agent_forest.py tests/test_mini_swe_agent_phase6.py
+uv run ruff check evmbench tests
+uv run mypy evmbench
+uv run pytest tests -q
 ```
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+See [LICENSE](LICENSE).

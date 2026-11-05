@@ -4,9 +4,8 @@ This is the durable reference for how EVMBench audit packages are laid out, how
 detect, patch, and exploit task membership is selected, and which audits support
 each mode.
 
-Use [gpt54-openrouter-runbook.md](gpt54-openrouter-runbook.md) for direct
-OpenAI GPT-5.4 launch commands and coverage tracking. Historical run snapshots
-live under [archive/gpt54-run-snapshots-2026-05.md](archive/gpt54-run-snapshots-2026-05.md).
+Use [campaign-runbook.md](campaign-runbook.md) to launch detect, patch, and
+exploit campaigns and to track coverage.
 
 ## Audit Folder Structure
 

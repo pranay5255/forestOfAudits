@@ -118,17 +118,23 @@ def test_branch_specs_use_isolated_paths_and_do_not_include_submission(tmp_path:
     assert all("/home/agent/AUDIT_SCOPE.md" in spec.staged_files for spec in specs)
 
 
-def test_branch_specs_assign_one_audit_file_per_branch(tmp_path: Path) -> None:
-    config = make_forest_config(tmp_path, branches_per_tree=1)
-    roles = [scout.get_tree_role("token-flow")]
-    audit_scope_files = ("src/A.sol", "src/B.sol")
+def test_branch_count_is_roles_times_branches_and_scope_is_neutral(tmp_path: Path) -> None:
+    config = make_forest_config(tmp_path, branches_per_tree=3)
+    roles = [scout.get_tree_role("token-flow"), scout.get_tree_role("accounting")]
+    # Runtime scope is always neutral: gold mappings never reach the worker.
+    audit_scope_files = modal_forest._audit_scope_files(
+        modal_forest.audit_registry.get_audit("2023-07-pooltogether"), "patch"
+    )
 
     specs = modal_forest._worker_specs_for_branches(config, roles, audit_scope_files)
 
-    assert len(specs) == 2
-    assert [spec.audit_scope_files for spec in specs] == [("src/A.sol",), ("src/B.sol",)]
-    assert "src/A.sol" in specs[0].staged_files["/home/agent/AUDIT_SCOPE.md"]
-    assert "src/B.sol" not in specs[0].staged_files["/home/agent/AUDIT_SCOPE.md"]
+    assert len(specs) == len(roles) * 3
+    assert all(spec.audit_scope_files == audit_scope_files for spec in specs)
+    assert all(
+        "full /home/agent/audit workspace is in scope"
+        in spec.staged_files["/home/agent/AUDIT_SCOPE.md"]
+        for spec in specs
+    )
 
 
 def test_global_judge_is_only_spec_that_extracts_submission(tmp_path: Path) -> None:
@@ -181,10 +187,17 @@ def test_tree_judge_stages_existing_and_missing_branch_reports(tmp_path: Path) -
     assert "Missing Branch Report" in staged["/home/agent/forest/token-flow/branch-inputs/branch-02.md"]
 
 
-def test_audit_scope_files_come_from_patch_mappings() -> None:
+def test_audit_scope_files_never_come_from_gold_patch_mappings() -> None:
     audit = modal_forest.audit_registry.get_audit("2023-07-pooltogether")
-
-    assert modal_forest._audit_scope_files(audit) == ("vault/src/Vault.sol",)
+    gold_paths = {
+        remote_path.split("/audit/", 1)[-1]
+        for vulnerability in audit.vulnerabilities
+        for remote_path in (vulnerability.patch_path_mapping or {}).values()
+    }
+    assert gold_paths
+    scope = modal_forest._audit_scope_files(audit)
+    assert scope == ()
+    assert not gold_paths.intersection(scope)
 
 
 def test_detect_audit_without_patch_mapping_uses_full_workspace_scope() -> None:
@@ -193,11 +206,10 @@ def test_detect_audit_without_patch_mapping_uses_full_workspace_scope() -> None:
     assert modal_forest._audit_scope_files(audit, "detect") == ()
 
 
-def test_patch_audit_without_patch_mapping_is_rejected() -> None:
+def test_patch_scope_does_not_require_gold_mappings() -> None:
     audit = modal_forest.audit_registry.get_audit("2024-01-canto")
 
-    with pytest.raises(RuntimeError, match="patch-mode focus metadata"):
-        modal_forest._audit_scope_files(audit, "patch")
+    assert modal_forest._audit_scope_files(audit, "patch") == ()
 
 
 def test_modal_forest_config_parses_all_modes(tmp_path: Path) -> None:

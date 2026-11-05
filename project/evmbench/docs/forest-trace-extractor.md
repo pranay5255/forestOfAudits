@@ -1,13 +1,11 @@
 # Forest Trace Extractor
 
-This guide covers the current extractor for turning mini-swe-agent forest
-trajectories plus Phase 6 or Modal metadata into validated dataset JSONL files.
-The archived implementation plan is in
-[archive/forest-trace-extractor-plan.md](archive/forest-trace-extractor-plan.md).
+This guide covers the extractor for turning legacy mini-swe-agent forest
+trajectories plus runner metadata into validated dataset JSONL files.
 
-Run the extractor after a Phase 6 root passes the trajectory-integrity gates in
-[phase6-runbook.md](phase6-runbook.md). The extractor never mutates raw run
-artifacts.
+The extractor never mutates raw run artifacts. New campaigns emit their own
+typed artifacts (see [campaign-runbook.md](campaign-runbook.md)); this tool
+remains for historical `modal-forest` run directories.
 
 ## Command
 

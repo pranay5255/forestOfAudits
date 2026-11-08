@@ -15,6 +15,7 @@ you are doing.
 | [audit-catalog-and-modes.md](audit-catalog-and-modes.md) | Audit folder structure, split membership, detect/patch/exploit behavior, and the audit catalog. |
 | [exploit-benchmark-guide.md](exploit-benchmark-guide.md) | How exploit-mode audits work and how to add a small exploit benchmark. |
 | [forest-trace-extractor.md](forest-trace-extractor.md) | Extracting datasets from legacy forest trajectories. |
+| [test-time-experiments/README.md](test-time-experiments/README.md) | Five DeepSeek test-time experiments (communication, breadth versus depth, selection, experience reuse, stopping) and the prompts that implement them. |
 
 ## Read order
 
@@ -25,6 +26,10 @@ For a new experiment:
    audits and modes.
 3. [campaign-runbook.md](campaign-runbook.md) to plan, preflight, run, and
    summarize.
+4. [test-time-experiments/README.md](test-time-experiments/README.md) when the
+   experiment is communication, breadth versus depth, selection, experience
+   reuse, or stopping. Paste the matching file under
+   `test-time-experiments/prompts/`.
 
 For exploit benchmarks:
 

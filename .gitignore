@@ -178,3 +178,15 @@ cython_debug/
 /exploit_results/
 /exploit_results_live_v3/
 /exploit_results_v3/
+
+# Agent trajectories, SFT datasets, and research artifacts
+project/evmbench/research-artifacts/
+**/trajectories/
+**/trajectory_*/
+*.jsonl
+
+# Run logs
+*Logs.txt
+**/forestLogs.txt
+**/modal-forestLogs.txt
+**/phase6variantsLogs.txt
